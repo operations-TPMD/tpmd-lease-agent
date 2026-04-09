@@ -215,11 +215,22 @@ STAGES & EXPECTED ACTIONS:
 - Call: Answered: Depends on conversation content — push to next step
 - ID Rejected: Explain why, ask them to re-upload, or if disqualified move to Lost
 - ID Verified: Push to book a showing immediately
-- Showing Scheduled: If showing date passed, ask for feedback. If upcoming, send reminder
-- Tenant Feedback: If positive feedback, push application. If negative, acknowledge and offer alternatives
-- Application Sent: Follow up on application status
+- Showing Scheduled:
+  * If showing date has NOT passed: No action yet
+  * If showing date has PASSED and no feedback yet (1+ days): Ask "How was the showing?" → follow up
+  * If customer says yes/interested: Send application link, move to "Tenant Feedback"
+  * If customer says no/not interested: Move to "Lost"
+- Tenant Feedback: If positive, send application link. If negative or no response, acknowledge and offer alternatives or move to Lost
+- Application Sent: Follow up on application status in 3-5 days
 - Leased / Won: No action needed
 - Lost: No action needed
+
+HANDLING CUSTOMER REQUESTS:
+- If customer asks to reschedule: Acknowledge and ask for preferred time. Update showing_date once confirmed.
+- If customer wants to cancel: Confirm cancellation, move to Lost, acknowledge professionally
+- If customer asks for application link: Send the application URL from contact data
+- If customer asks property questions: Answer from property_address, property_headline, special_offer, property_summary data
+- If customer confirms showing time: Extract the time/date, confirm back, update showing_date
 
 RESPOND WITH EXACTLY THIS JSON FORMAT:
 {
