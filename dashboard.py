@@ -755,7 +755,7 @@ function render() {
   if (!fl.length) { document.getElementById('content').innerHTML = '<div class="center"><p style="color:#64748b">No leads match this filter</p></div>'; return; }
 
   let h = `<div class="tc"><table><thead><tr>
-    <th style="width:30px"></th>
+    <th style="width:40px;min-width:40px"></th>
     <th>Lead</th>
     <th>Stage</th>
     <th>Activity</th>
@@ -797,7 +797,10 @@ function render() {
     }
 
     h += `<tr class="${cls}">
-      <td>${isAct && !l.executed ? `<button class="chk ${l.approved?'on':''}" onclick="toggleApprove('${l.id}')">${l.approved?'✓':''}</button>` : ''}</td>
+      <td style="text-align:center">
+        ${isAct && !l.executed ? `<button class="chk ${l.approved?'on':''}" onclick="toggleApprove('${l.id}')" title="${l.action==='call_for_showing'?'Approve to trigger voice bot call':'Approve'}">${l.approved?'✓':''}</button>` : ''}
+        ${l.action==='call_for_showing' && !l.executed ? `<div style="font-size:9px;color:#D97706;margin-top:2px">📞</div>` : ''}
+      </td>
       <td>
         <div class="lead-name">${esc(l.name||'Unknown')}</div>
         <div class="lead-phone">${l.phone||''} ${l.email?'· '+l.email:''}</div>
