@@ -25,15 +25,15 @@ from lease_agent import (
 
 logger = logging.getLogger("response_engine")
 
-# Business hours: 9am - 7pm Eastern (UTC-4)
-BIZ_START_HOUR = 13  # 9am ET = 13 UTC
-BIZ_END_HOUR = 23    # 7pm ET = 23 UTC
+# Business hours: 9am - 7pm Eastern Time (handles EDT/EST automatically)
+import zoneinfo
+ET = zoneinfo.ZoneInfo("America/New_York")
 
 
 def is_business_hours() -> bool:
-    """Check if current time is within business hours."""
-    now = datetime.now(timezone.utc)
-    return BIZ_START_HOUR <= now.hour < BIZ_END_HOUR
+    """Check if current time is within business hours (9am-7pm ET)."""
+    now_et = datetime.now(ET)
+    return 9 <= now_et.hour < 19
 
 
 async def periodic_scan(dry_run: bool = False) -> dict:
@@ -186,10 +186,9 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
 
 
 class PeriodicScheduler:
-    """Runs periodic_scan every 2 hours: 9am, 11am, 1pm, 3pm, 5pm, 7pm ET."""
+    """Runs periodic_scan every 2 hours: 9am, 11am, 1pm, 3pm, 5pm, 7pm Florida ET."""
 
-    # Run times in UTC (ET is UTC-4, so add 4 hours)
-    RUN_HOURS_UTC = [13, 15, 17, 19, 21, 23]  # 9am, 11am, 1pm, 3pm, 5pm, 7pm ET
+    RUN_HOURS_ET = [9, 11, 13, 15, 17, 19]  # 9am, 11am, 1pm, 3pm, 5pm, 7pm ET
 
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
@@ -197,26 +196,26 @@ class PeriodicScheduler:
         self._task = None
         self.last_run = None
         self.last_result = None
-        self._last_run_hour = None  # Track last run hour to avoid duplicate runs
+        self._last_run_hour = None  # Track last run ET hour to avoid duplicate runs
 
     async def _loop(self):
         self.running = True
         while self.running:
-            now = datetime.now(timezone.utc)
-            current_hour = now.hour
+            now_et = datetime.now(ET)
+            current_hour_et = now_et.hour
 
-            # Check if it's time to run
+            # Check if it's time to run (Florida ET hours)
             should_run = False
             if is_business_hours():
-                if current_hour in self.RUN_HOURS_UTC and self._last_run_hour != current_hour:
+                if current_hour_et in self.RUN_HOURS_ET and self._last_run_hour != current_hour_et:
                     should_run = True
 
             if should_run:
-                logger.info(f"Periodic scan starting at {now.isoformat()} (dry_run={self.dry_run})")
+                logger.info(f"Periodic scan starting at {now_et.strftime('%Y-%m-%d %H:%M ET')} (dry_run={self.dry_run})")
                 try:
                     self.last_result = await periodic_scan(dry_run=self.dry_run)
-                    self.last_run = now.isoformat()
-                    self._last_run_hour = current_hour
+                    self.last_run = now_et.isoformat()
+                    self._last_run_hour = current_hour_et
                 except Exception as e:
                     logger.error(f"Periodic scan failed: {e}")
                     self.last_result = {"status": "error", "message": str(e)}
