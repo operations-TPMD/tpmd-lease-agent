@@ -43,6 +43,7 @@ async def periodic_scan(dry_run: bool = False) -> dict:
         return {"status": "outside_business_hours", "actions": 0}
 
     summary = {"status": "completed", "actions": 0, "skipped": 0, "errors": 0, "details": []}
+    RATE_LIMIT_DELAY = 0.3  # 300ms delay between AI calls to avoid rate limiting
 
     async with httpx.AsyncClient(timeout=30) as client:
         opps = await get_all_opportunities(client)
@@ -65,6 +66,8 @@ async def periodic_scan(dry_run: bool = False) -> dict:
                     summary["skipped"] += 1
                     continue
 
+                # Add delay to avoid rate limiting
+                await asyncio.sleep(RATE_LIMIT_DELAY)
                 decision = await ask_claude(client, lead)
                 action = decision.get("action", "skip")
 

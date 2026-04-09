@@ -78,7 +78,8 @@ async def api_templates():
     return JSONResponse(TEMPLATES)
 
 
-SCAN_CONCURRENCY = 5  # Process 5 leads at a time
+SCAN_CONCURRENCY = 2  # Reduce from 5 to 2 to avoid rate limiting
+RATE_LIMIT_DELAY = 0.5  # 500ms delay between AI calls
 
 
 async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyncio.Semaphore) -> dict:
@@ -145,6 +146,8 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
             if lead["dnd"]:
                 decision = {"action": "skip", "reasoning": "DND enabled", "message": "", "new_stage": ""}
             else:
+                # Add delay to avoid rate limiting
+                await asyncio.sleep(RATE_LIMIT_DELAY)
                 decision = await ask_claude(client, lead)
 
             templates = get_templates_for_stage(stage_name)
