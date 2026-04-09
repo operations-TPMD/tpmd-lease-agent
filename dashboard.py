@@ -60,7 +60,7 @@ async def logo2():
 VOICE_BOT_AGENT_ID = "69d658fa4ccb41abc9c6f543"
 
 # Periodic scheduler (starts in dry-run mode)
-scheduler = PeriodicScheduler(interval_seconds=3600, dry_run=True)
+scheduler = PeriodicScheduler(dry_run=True)
 
 scan_cache: dict = {"leads": [], "scan_time": None, "scanning": False}
 
@@ -564,7 +564,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <div class="sched-bar">
   <span class="sched-dot dry" id="schedDot"></span>
-  <span class="sched-info">Auto-scan: <strong id="schedMode">DRY RUN</strong> — every 1h (9am-7pm ET)</span>
+  <span class="sched-info">Auto-scan: <strong id="schedMode">DRY RUN</strong> — every 2h (9am, 11am, 1pm, 3pm, 5pm, 7pm ET)</span>
   <span class="sched-info" id="schedLast"></span>
   <button class="sched-toggle" id="schedToggle" onclick="toggleScheduler()">Switch to LIVE</button>
   <span class="sched-info" style="margin-left:auto">Webhook: <code style="color:#38bdf8">POST /api/webhook/inbound</code></span>

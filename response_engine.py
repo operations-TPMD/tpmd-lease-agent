@@ -2,7 +2,7 @@
 Response Time Engine for Lease Agent
 
 Two modes:
-1. PERIODIC — Runs every hour (9am-7pm ET), scans all active leads, takes action
+1. PERIODIC — Runs every 2 hours (9am, 11am, 1pm, 3pm, 5pm, 7pm ET), scans active leads, takes action
 2. INSTANT — Webhook endpoint that GHL calls when a lead sends a message/takes action
 
 Setup for instant responses:
@@ -183,36 +183,47 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
 
 
 class PeriodicScheduler:
-    """Runs periodic_scan every hour during business hours."""
+    """Runs periodic_scan every 2 hours: 9am, 11am, 1pm, 3pm, 5pm, 7pm ET."""
 
-    def __init__(self, interval_seconds: int = 3600, dry_run: bool = True):
-        self.interval = interval_seconds
+    # Run times in UTC (ET is UTC-4, so add 4 hours)
+    RUN_HOURS_UTC = [13, 15, 17, 19, 21, 23]  # 9am, 11am, 1pm, 3pm, 5pm, 7pm ET
+
+    def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
         self.running = False
         self._task = None
         self.last_run = None
         self.last_result = None
+        self._last_run_hour = None  # Track last run hour to avoid duplicate runs
 
     async def _loop(self):
         self.running = True
         while self.running:
+            now = datetime.now(timezone.utc)
+            current_hour = now.hour
+
+            # Check if it's time to run
+            should_run = False
             if is_business_hours():
-                logger.info(f"Periodic scan starting (dry_run={self.dry_run})")
+                if current_hour in self.RUN_HOURS_UTC and self._last_run_hour != current_hour:
+                    should_run = True
+
+            if should_run:
+                logger.info(f"Periodic scan starting at {now.isoformat()} (dry_run={self.dry_run})")
                 try:
                     self.last_result = await periodic_scan(dry_run=self.dry_run)
-                    self.last_run = datetime.now(timezone.utc).isoformat()
+                    self.last_run = now.isoformat()
+                    self._last_run_hour = current_hour
                 except Exception as e:
                     logger.error(f"Periodic scan failed: {e}")
                     self.last_result = {"status": "error", "message": str(e)}
-            else:
-                logger.info("Outside business hours, skipping periodic scan")
 
-            await asyncio.sleep(self.interval)
+            await asyncio.sleep(60)  # Check every minute
 
     def start(self):
         if self._task is None:
             self._task = asyncio.create_task(self._loop())
-            logger.info(f"Scheduler started: every {self.interval}s, dry_run={self.dry_run}")
+            logger.info(f"Scheduler started: every 2 hours (9am, 11am, 1pm, 3pm, 5pm, 7pm ET), dry_run={self.dry_run}")
 
     def stop(self):
         self.running = False
