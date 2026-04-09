@@ -166,6 +166,16 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
     custom = parse_custom_fields(contact.get("customFields", []))
     now = datetime.now(timezone.utc)
 
+    # Also check GHL appointments for showing date
+    showing_date = custom.get("showing_date", "")
+    if not showing_date:
+        appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
+        for appt in appts.get("events", []):
+            appt_date = appt.get("startTime", "")[:10]
+            if appt_date:
+                showing_date = appt_date
+                break
+
     return {
         "opportunity_id": opp["id"],
         "contact_id": contact_id,
@@ -183,7 +193,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "property_address": custom.get("property_address", ""),
         "id_status": custom.get("id_verification_status", ""),
         "lock_code": custom.get("lock_code", ""),
-        "showing_date": custom.get("showing_date", ""),
+        "showing_date": showing_date,
         "application_url": custom.get("application_url", ""),
         "special_offer": custom.get("special_offer", ""),
         "property_summary": custom.get("property_summary", "")[:200],
