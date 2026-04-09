@@ -267,14 +267,14 @@ async def api_apply_template(opp_id: str, template_id: str):
 
 
 @app.post("/api/trigger-voice-bot/{contact_id}")
-async def api_trigger_voice_bot(contact_id: str):
+async def api_call_for_showing(contact_id: str):
     """Trigger the voice AI bot for a contact to schedule showing."""
     # GHL voice AI agents are triggered via workflows
     # For now, return info about how to set this up
     return JSONResponse({
         "status": "pending_setup",
         "agent_id": VOICE_BOT_AGENT_ID,
-        "message": "Voice bot trigger needs workflow connection. Create a workflow with 'Contact Tag Added' trigger for tag 'trigger_voice_bot', then add Voice AI action.",
+        "message": "Voice bot trigger needs workflow connection. Create a workflow with 'Contact Tag Added' trigger for tag 'call_for_showing', then add Voice AI action.",
         "contact_id": contact_id,
     })
 
@@ -294,7 +294,7 @@ async def api_execute():
                 if action in ("update_stage", "send_sms_and_update_stage"):
                     if lead["new_stage"]:
                         await update_stage(client, lead["id"], lead["new_stage"])
-                if action == "trigger_voice_bot":
+                if action == "call_for_showing":
                     await add_contact_tag(client, lead["contact_id"], "call_for_showing")
                 lead["executed"] = True
                 results.append({"id": lead["id"], "name": lead["name"], "status": "success"})
@@ -671,7 +671,12 @@ async function load() {
   const r = await fetch('/api/leads');
   const d = await r.json();
   leads = d.leads || [];
-  if (d.scan_time) document.getElementById('scanTime').textContent = 'Last: ' + d.scan_time;
+  if (d.scan_time) {
+    const utc = new Date(d.scan_time);
+    const israel = utc.toLocaleString('he-IL', {timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit'});
+    const florida = utc.toLocaleString('en-US', {timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit'});
+    document.getElementById('scanTime').textContent = `Last: 🇮🇱 ${israel} | 🇺🇸 ${florida}`;
+  }
   if (leads.length) { show('stats'); show('filters'); show('bar'); }
   updateStats(); render();
 }
@@ -701,12 +706,12 @@ function sc(s) {
 }
 function ac(a) {
   if (a === 'send_sms') return 'a-sms'; if (a === 'update_stage') return 'a-stg';
-  if (a === 'send_sms_and_update_stage') return 'a-both'; if (a === 'trigger_voice_bot') return 'a-call';
+  if (a === 'send_sms_and_update_stage') return 'a-both'; if (a === 'call_for_showing') return 'a-call';
   if (a === 'error') return 'a-err'; return 'a-skip';
 }
 function al(a) {
   if (a === 'send_sms') return 'SMS'; if (a === 'update_stage') return 'Move';
-  if (a === 'send_sms_and_update_stage') return 'SMS+Move'; if (a === 'trigger_voice_bot') return 'Call Bot';
+  if (a === 'send_sms_and_update_stage') return 'SMS+Move'; if (a === 'call_for_showing') return 'Call Bot';
   if (a === 'error') return 'Error'; return 'Skip';
 }
 
@@ -717,14 +722,17 @@ function setF(f, el) {
 }
 
 function render() {
-  let fl = leads;
-  if (filter === 'action') fl = leads.filter(l => !['skip','error'].includes(l.action));
-  else if (filter === 'urgent') fl = leads.filter(l => (l.days_since_last_activity || 0) >= 3 && !['Lost','Leased / Won'].includes(l.stage));
-  else if (filter !== 'all') fl = leads.filter(l => l.action === filter);
+  let fl = leads.filter(l => !['Lost','Leased / Won'].includes(l.stage));  // Always exclude terminal stages
+  if (filter === 'action') fl = fl.filter(l => !['skip','error'].includes(l.action));
+  else if (filter === 'urgent') fl = fl.filter(l => (l.days_since_last_activity || 0) >= 3);
+  else if (filter !== 'all') fl = fl.filter(l => l.action === filter);
 
   fl.sort((a,b) => {
-    const o = {send_sms_and_update_stage:0, send_sms:1, update_stage:2, error:3, skip:4};
-    return (o[a.action]??5) - (o[b.action]??5);
+    // Sort by: 1) days inactive (oldest first), 2) action priority
+    const days_diff = (b.days_since_last_activity || 0) - (a.days_since_last_activity || 0);
+    if (days_diff !== 0) return days_diff;
+    const o = {send_sms_and_update_stage:0, send_sms:1, update_stage:2, trigger_voice_bot:3, error:4, skip:5};
+    return (o[a.action]??6) - (o[b.action]??6);
   });
 
   if (!fl.length) { document.getElementById('content').innerHTML = '<div class="center"><p style="color:#64748b">No leads match this filter</p></div>'; return; }
@@ -866,7 +874,7 @@ async function triggerVoice(contactId, name) {
   const r = await fetch(`/api/trigger-voice-bot/${contactId}`, {method:'POST'});
   const d = await r.json();
   if (d.status === 'pending_setup') {
-    alert('Voice bot setup needed: Create a GHL workflow with trigger tag "trigger_voice_bot" and connect it to your Voice AI agent.');
+    alert('Voice bot setup needed: Create a GHL workflow with trigger tag "call_for_showing" and connect it to your Voice AI agent.');
   } else {
     alert('Voice bot triggered!');
   }
