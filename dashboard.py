@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 sys.path.insert(0, os.path.dirname(__file__))
 from lease_agent import (
     get_all_opportunities, enrich_lead, ask_claude,
-    send_sms, update_stage, STAGE_MAP, STAGE_NAME_TO_ID,
+    send_sms, update_stage, add_contact_tag, STAGE_MAP, STAGE_NAME_TO_ID,
     LEASE_PIPELINE_ID, GHL_API_KEY, GHL_LOCATION_ID, OPENAI_API_KEY,
     ghl_headers, GHL_API_BASE,
 )
@@ -290,6 +290,8 @@ async def api_execute():
                 if action in ("update_stage", "send_sms_and_update_stage"):
                     if lead["new_stage"]:
                         await update_stage(client, lead["id"], lead["new_stage"])
+                if action == "trigger_voice_bot":
+                    await add_contact_tag(client, lead["contact_id"], "call_for_showing")
                 lead["executed"] = True
                 results.append({"id": lead["id"], "name": lead["name"], "status": "success"})
             except Exception as e:
@@ -482,6 +484,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .a-sms  { background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; }
   .a-stg  { background: #FAF5FF; color: #7E22CE; border: 1px solid #E9D5FF; }
   .a-both { background: linear-gradient(135deg, #FAF5FF, #EFF6FF); color: #6D28D9; border: 1px solid #C4B5FD; }
+  .a-call { background: #FEF08A; color: #854D0E; border: 1px solid #FCD34D; }
   .a-skip { background: #F9FAFB; color: #9CA3AF; border: 1px solid #E5E7EB; }
   .a-err  { background: #FEF2F2; color: #991B1B; border: 1px solid #FECACA; }
 
@@ -663,11 +666,13 @@ function sc(s) {
 }
 function ac(a) {
   if (a === 'send_sms') return 'a-sms'; if (a === 'update_stage') return 'a-stg';
-  if (a === 'send_sms_and_update_stage') return 'a-both'; if (a === 'error') return 'a-err'; return 'a-skip';
+  if (a === 'send_sms_and_update_stage') return 'a-both'; if (a === 'trigger_voice_bot') return 'a-call';
+  if (a === 'error') return 'a-err'; return 'a-skip';
 }
 function al(a) {
   if (a === 'send_sms') return 'SMS'; if (a === 'update_stage') return 'Move';
-  if (a === 'send_sms_and_update_stage') return 'SMS+Move'; if (a === 'error') return 'Error'; return 'Skip';
+  if (a === 'send_sms_and_update_stage') return 'SMS+Move'; if (a === 'trigger_voice_bot') return 'Call Bot';
+  if (a === 'error') return 'Error'; return 'Skip';
 }
 
 function setF(f, el) {

@@ -214,7 +214,7 @@ STAGES & EXPECTED ACTIONS:
 - Call: No Answer: Try calling again, or send SMS asking for good time to talk
 - Call: Answered: Depends on conversation content — push to next step
 - ID Rejected: Explain why, ask them to re-upload, or if disqualified move to Lost
-- ID Verified: Push to book a showing immediately
+- ID Verified: TRIGGER VOICE BOT to call and book a showing
 - Showing Scheduled:
   * If showing date has NOT passed: No action yet
   * If showing date has PASSED and no feedback yet (1+ days): Ask "How was the showing?"
@@ -265,11 +265,18 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
 
 RESPOND WITH EXACTLY THIS JSON FORMAT:
 {
-  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "skip",
+  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "trigger_voice_bot" | "skip",
   "message": "SMS text here (only if sending)",
   "new_stage": "Stage Name (only if updating stage)",
   "reasoning": "Brief explanation of why this action"
-}"""
+}
+
+ACTION GUIDE:
+- "send_sms": Send an SMS message to the customer
+- "update_stage": Move the opportunity to a new stage
+- "send_sms_and_update_stage": Do both — send SMS and update stage
+- "trigger_voice_bot": Add the 'call_for_showing' tag, which triggers GHL workflow to call the customer (for booking showings)
+- "skip": No action needed right now"""
 
 
 def _build_user_prompt(lead_context: dict) -> str:
@@ -391,6 +398,13 @@ async def update_stage(client: httpx.AsyncClient, opportunity_id: str, new_stage
     return resp.json()
 
 
+async def add_contact_tag(client: httpx.AsyncClient, contact_id: str, tag: str) -> dict:
+    """Add a tag to a contact (triggers GHL workflows)."""
+    return await ghl_post(client, f"/contacts/{contact_id}/tags", {
+        "tags": [tag],
+    })
+
+
 async def execute_action(
     client: httpx.AsyncClient, lead: dict, decision: dict, dry_run: bool
 ) -> str:
@@ -419,6 +433,13 @@ async def execute_action(
         else:
             await update_stage(client, lead["opportunity_id"], new_stage)
             log_lines.append(f"  🔄 MOVED {name}: {lead['stage']} → {new_stage}")
+
+    if action == "trigger_voice_bot":
+        if dry_run:
+            log_lines.append(f"  📞 [DRY RUN] Would trigger voice bot for {name}")
+        else:
+            await add_contact_tag(client, lead["contact_id"], "call_for_showing")
+            log_lines.append(f"  📞 TRIGGERED voice bot for {name} (tag: call_for_showing)")
 
     if not log_lines:
         log_lines.append(f"  ❓ Unknown action '{action}' for {name}: {reasoning}")
