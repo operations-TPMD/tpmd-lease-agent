@@ -63,6 +63,7 @@ VOICE_BOT_AGENT_ID = "69d658fa4ccb41abc9c6f543"
 scheduler = PeriodicScheduler(dry_run=True)
 
 scan_cache: dict = {"leads": [], "scan_time": None, "scanning": False}
+webhook_log: list = []  # Track all webhook calls for debugging
 
 
 # ── API Endpoints ────────────────────────────────────────────────────────────
@@ -348,12 +349,43 @@ async def api_webhook_inbound(body: dict):
     contact_id = body.get("contact_id") or body.get("contactId") or body.get("contact", {}).get("id", "")
     message = body.get("message", "")
 
+    # Log the webhook call
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "contact_id": contact_id,
+        "message": message[:100],
+        "status": "received"
+    }
+
     if not contact_id:
+        log_entry["status"] = "error: no contact_id"
+        webhook_log.append(log_entry)
         return JSONResponse({"error": "contact_id required"}, status_code=400)
 
     # Use scheduler's dry_run setting
-    result = await handle_inbound(contact_id, message, dry_run=scheduler.dry_run)
+    try:
+        result = await handle_inbound(contact_id, message, dry_run=scheduler.dry_run)
+        log_entry["status"] = result.get("status", "processed")
+        log_entry["action"] = result.get("action", "skip")
+    except Exception as e:
+        log_entry["status"] = f"error: {str(e)[:50]}"
+        result = {"status": "error", "message": str(e)[:200]}
+
+    webhook_log.append(log_entry)
+    # Keep only last 100 webhook logs
+    if len(webhook_log) > 100:
+        webhook_log.pop(0)
+
     return JSONResponse(result)
+
+
+@app.get("/api/webhook-log")
+async def api_webhook_log():
+    """Get recent webhook activity for debugging."""
+    return JSONResponse({
+        "total_received": len(webhook_log),
+        "recent": webhook_log[-20:]  # Last 20 entries
+    })
 
 
 # ── Dashboard HTML ───────────────────────────────────────────────────────────
@@ -570,7 +602,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <span class="sched-info">Auto-scan: <strong id="schedMode">DRY RUN</strong> — every 2h (9am, 11am, 1pm, 3pm, 5pm, 7pm ET)</span>
   <span class="sched-info" id="schedLast"></span>
   <button class="sched-toggle" id="schedToggle" onclick="toggleScheduler()">Switch to LIVE</button>
-  <span class="sched-info" style="margin-left:auto">Webhook: <code style="color:#38bdf8">POST /api/webhook/inbound</code></span>
+  <span class="sched-info" style="margin-left:auto">Webhook: <code style="color:#38bdf8">POST /api/webhook/inbound</code> | <a href="/api/webhook-log" target="_blank" style="color:#38bdf8; text-decoration:underline">Activity Log</a></span>
 </div>
 
 <div class="stats" id="stats" style="display:none">
