@@ -209,12 +209,15 @@ RULES:
 8. Use a warm, professional, but casual tone
 
 STAGES & EXPECTED ACTIONS:
-- New Lead: Greet, ask what property they're interested in, nudge ID upload
+- Inquiry Stage (NEW LEAD from Zillow/signs):
+  * If JUST created (< 1 hour): Send initial SMS with property details
+  * If 1+ hours AND no showing scheduled: TRIGGER VOICE BOT to call and book showing (PRIORITY)
+  * If already called, still no showing: Call again (multiple times, space out attempts)
+
 - Verification Auto-Sent: If no ID uploaded after 24h, send reminder. After 48h, more urgent reminder
 - Call: No Answer: Try calling again, or send SMS asking for good time to talk
 - Call: Answered: Depends on conversation content — push to next step
 - ID Rejected: Explain why, ask them to re-upload, or if disqualified move to Lost
-- ID Verified: TRIGGER VOICE BOT to call and book a showing
 - Showing Scheduled:
   * If showing date has NOT passed: No action yet
   * If showing date has PASSED and no feedback yet (1+ days): Ask "How was the showing?"
@@ -237,6 +240,12 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
   * Move to "Tenant Feedback" stage
   * **Record their feedback** in notes so we know if there's a property problem
   * Suggest alternatives if possible
+
+**VOICE BOT TRIGGER LOGIC:**
+- Trigger if: Lead in "Inquiry" stage AND Hours Since Creation >= 1 AND NOT yet in "Showing Scheduled"
+- Action: Add tag 'call_for_showing' → GHL workflow calls them with voice bot
+- Goal: Get them to commit to a showing time on the call
+- Multiple calls throughout day are OK if they don't commit
 
 **Reschedule Requests:**
 - If "Can't make it Thursday": Offer new time OR send reschedule link
@@ -280,6 +289,15 @@ ACTION GUIDE:
 
 
 def _build_user_prompt(lead_context: dict) -> str:
+    # Calculate hours since lead was created
+    try:
+        from datetime import datetime as dt_class
+        created = dt_class.fromisoformat(lead_context['created_at'].replace('Z', '+00:00'))
+        current = dt_class.fromisoformat(lead_context['current_time'].replace('Z', '+00:00'))
+        hours_since_creation = (current - created).total_seconds() / 3600
+    except:
+        hours_since_creation = 0
+
     prompt = f"""Analyze this lead and decide the best action:
 
 Lead: {lead_context['name']}
@@ -295,6 +313,7 @@ Tags: {', '.join(lead_context['tags']) if lead_context['tags'] else 'None'}
 DND: {lead_context['dnd']}
 Special Offer: {lead_context['special_offer'] or 'None'}
 Lead Created: {lead_context['created_at'][:10]}
+Hours Since Creation: {hours_since_creation:.1f}h
 Last Stage Change: {lead_context['last_stage_change'][:10]}
 Current Time: {lead_context['current_time'][:16]} UTC
 
