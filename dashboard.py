@@ -158,7 +158,7 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
                     hours_old = (now_utc - created).total_seconds() / 3600
                     if not lead.get("showing_date") and hours_old >= 1 and not lead["dnd"]:
                         if stage_name not in ("Leased / Won", "Lost"):
-                            decision["action"] = "trigger_voice_bot"
+                            decision["action"] = "call_for_showing"
                             decision["reasoning"] = f"[AUTO] {hours_old:.0f}h old, no showing scheduled → trigger voice bot. " + decision.get("reasoning", "")
                 except Exception:
                     pass
@@ -636,7 +636,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button class="fbtn" onclick="setF('action',this)">Actions Only</button>
   <button class="fbtn" onclick="setF('send_sms',this)">SMS</button>
   <button class="fbtn" onclick="setF('update_stage',this)">Stage Updates</button>
-  <button class="fbtn" onclick="setF('trigger_voice_bot',this)">Call Bot</button>
+  <button class="fbtn" onclick="setF('call_for_showing',this)">Call Bot</button>
   <button class="fbtn" onclick="setF('skip',this)">Skipped</button>
   <button class="fbtn" onclick="setF('urgent',this)">Urgent (3+ days)</button>
 </div>
@@ -701,7 +701,7 @@ function updateStats() {
   const act = leads.filter(l => !['skip','error'].includes(l.action)).length;
   const sms = leads.filter(l => l.action?.includes('sms')).length;
   const stg = leads.filter(l => l.action?.includes('stage')).length;
-  const call = leads.filter(l => l.action === 'trigger_voice_bot').length;
+  const call = leads.filter(l => l.action === 'call_for_showing').length;
   const skp = leads.filter(l => l.action === 'skip').length;
   const apr = leads.filter(l => l.approved).length;
   document.getElementById('nTotal').textContent = t;
@@ -748,7 +748,7 @@ function render() {
     // Sort by: 1) days inactive (oldest first), 2) action priority
     const days_diff = (b.days_since_last_activity || 0) - (a.days_since_last_activity || 0);
     if (days_diff !== 0) return days_diff;
-    const o = {send_sms_and_update_stage:0, send_sms:1, update_stage:2, trigger_voice_bot:3, error:4, skip:5};
+    const o = {send_sms_and_update_stage:0, send_sms:1, update_stage:2, call_for_showing:3, error:4, skip:5};
     return (o[a.action]??6) - (o[b.action]??6);
   });
 
