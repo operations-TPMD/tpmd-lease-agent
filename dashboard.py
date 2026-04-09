@@ -204,7 +204,7 @@ async def api_scan():
             tasks = [_process_one_opp(client, opp, semaphore) for opp in opps]
             results = await asyncio.gather(*tasks)
             scan_cache["leads"] = list(results)
-            scan_cache["scan_time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            scan_cache["scan_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     finally:
         scan_cache["scanning"] = False
 
@@ -613,6 +613,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="stat act"><div class="n" id="nAct">0</div><div class="l">Actions</div></div>
   <div class="stat sms"><div class="n" id="nSms">0</div><div class="l">SMS</div></div>
   <div class="stat stg"><div class="n" id="nStg">0</div><div class="l">Stage Moves</div></div>
+  <div class="stat" style="border-top:3px solid #F59E0B"><div class="n" id="nCall" style="color:#D97706">0</div><div class="l">Call Bot</div></div>
   <div class="stat skp"><div class="n" id="nSkp">0</div><div class="l">Skipped</div></div>
   <div class="stat apr"><div class="n" id="nApr">0</div><div class="l">Approved</div></div>
 </div>
@@ -622,6 +623,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button class="fbtn" onclick="setF('action',this)">Actions Only</button>
   <button class="fbtn" onclick="setF('send_sms',this)">SMS</button>
   <button class="fbtn" onclick="setF('update_stage',this)">Stage Updates</button>
+  <button class="fbtn" onclick="setF('trigger_voice_bot',this)">Call Bot</button>
   <button class="fbtn" onclick="setF('skip',this)">Skipped</button>
   <button class="fbtn" onclick="setF('urgent',this)">Urgent (3+ days)</button>
 </div>
@@ -686,12 +688,14 @@ function updateStats() {
   const act = leads.filter(l => !['skip','error'].includes(l.action)).length;
   const sms = leads.filter(l => l.action?.includes('sms')).length;
   const stg = leads.filter(l => l.action?.includes('stage')).length;
+  const call = leads.filter(l => l.action === 'trigger_voice_bot').length;
   const skp = leads.filter(l => l.action === 'skip').length;
   const apr = leads.filter(l => l.approved).length;
   document.getElementById('nTotal').textContent = t;
   document.getElementById('nAct').textContent = act;
   document.getElementById('nSms').textContent = sms;
   document.getElementById('nStg').textContent = stg;
+  document.getElementById('nCall').textContent = call;
   document.getElementById('nSkp').textContent = skp;
   document.getElementById('nApr').textContent = apr;
   document.getElementById('nAprBar').textContent = apr;
