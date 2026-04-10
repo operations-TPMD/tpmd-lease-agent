@@ -191,7 +191,15 @@ class PeriodicScheduler:
     RUN_HOURS_ET = [9, 11, 13, 15, 17, 19]  # 9am, 11am, 1pm, 3pm, 5pm, 7pm ET
 
     def __init__(self, dry_run: bool = True):
-        self.dry_run = dry_run
+        import os
+        # Allow Railway env var to override default
+        env_mode = os.environ.get("SCHEDULER_MODE", "").upper()
+        if env_mode == "LIVE":
+            self.dry_run = False
+        elif env_mode == "DRY_RUN":
+            self.dry_run = True
+        else:
+            self.dry_run = dry_run
         self.running = False
         self._task = None
         self.last_run = None
