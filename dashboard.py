@@ -150,18 +150,6 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
                 await asyncio.sleep(RATE_LIMIT_DELAY)
                 decision = await ask_claude(client, lead)
 
-                # Override: if no showing scheduled and 1+ hour old, force voice bot
-                try:
-                    from datetime import datetime as dt_class
-                    created = dt_class.fromisoformat(lead["created_at"].replace("Z", "+00:00"))
-                    now_utc = dt_class.now(timezone.utc)
-                    hours_old = (now_utc - created).total_seconds() / 3600
-                    if not lead.get("showing_date") and hours_old >= 1 and not lead["dnd"]:
-                        if stage_name not in ("Leased / Won", "Lost"):
-                            decision["action"] = "call_for_showing"
-                            decision["reasoning"] = f"[AUTO] {hours_old:.0f}h old, no showing scheduled → trigger voice bot. " + decision.get("reasoning", "")
-                except Exception:
-                    pass
 
             templates = get_templates_for_stage(stage_name)
 

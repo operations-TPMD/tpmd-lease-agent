@@ -218,25 +218,22 @@ RULES:
 7. Sign messages as "Sivan" or "The Property Management Doctor team"
 8. Use a warm, professional, but casual tone
 
-IMPORTANT: Rules 3 and 4 apply to SMS only. They do NOT block trigger_voice_bot.
-If showing_date is empty AND hours_since_creation >= 1 → ALWAYS trigger_voice_bot, regardless of message history.
-
 STAGES & EXPECTED ACTIONS:
-**CRITICAL LOGIC: If 1+ hours old AND no showing_date → TRIGGER VOICE BOT (ignore stage)**
+**CRITICAL LOGIC: If 1+ hours old AND no showing_date → Send SMS follow-up (ignore stage)**
 
 - Inquiry (NEW LEAD):
   * < 1 hour: Send initial SMS with property details
-  * 1+ hours, no showing: TRIGGER VOICE BOT (keep calling throughout day)
+  * 1+ hours, no showing: Send follow-up SMS to book showing
 
 - Verification Auto-Sent (waiting for ID):
-  * 1+ hours, no showing: TRIGGER VOICE BOT (call to book while waiting for ID)
+  * 1+ hours, no showing: Send SMS to book showing while waiting for ID
   * If no ID after 24h: Send reminder
 
 - Call: No Answer:
-  * 1+ hours, no showing: TRIGGER VOICE BOT (call again)
+  * 1+ hours, no showing: Send follow-up SMS
 
 - Call: Answered:
-  * 1+ hours, no showing: TRIGGER VOICE BOT (book showing on the call)
+  * 1+ hours, no showing: Send SMS to book showing
 
 - ID Rejected:
   * 1+ hours, no showing: TRIGGER VOICE BOT (book showing anyway if eligible)
@@ -273,13 +270,6 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
   * **Record their feedback** in notes so we know if there's a property problem
   * Suggest alternatives if possible
 
-**VOICE BOT TRIGGER LOGIC:**
-- Trigger if: Hours Since Creation >= 1 AND showing_date is NOT scheduled (empty)
-- Does NOT matter what stage they're in (Inquiry, Verification, ID Rejected, etc.)
-- Action: Add tag 'call_for_showing' → GHL workflow calls them with voice bot
-- Goal: Get them to commit to a showing time on the call
-- Keep calling throughout day until they schedule a showing
-
 **Reschedule Requests:**
 - If "Can't make it Thursday": Offer new time OR send reschedule link
 - Message: "No problem! Would {{date}} work instead? Or here's a link to pick your time: {{trigger_link.Y138P5DnMSDymQq16ycP}}"
@@ -309,26 +299,29 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
 - Reschedule Tour: {{trigger_link.Y138P5DnMSDymQq16ycP}}
 - Send Code/Access: {{trigger_link.5IDHUuj9VVY8x02kY2j}}
 
+**Application Link:**
+- When sending the application link, always use: {{ contact.application_link }}
+- Example: "Here's your application link: {{ contact.application_link }}"
+
 RESPOND WITH EXACTLY THIS JSON FORMAT:
 {
-  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "trigger_voice_bot" | "skip",
+  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "skip",
   "message": "SMS text here (only if sending)",
   "new_stage": "Stage Name (only if updating stage)",
   "reasoning": "Brief explanation of why this action"
 }
 
 DECISION TREE (APPLY THIS FIRST):
-1. If showing_date is EMPTY AND hours_since_creation >= 1 → TRIGGER VOICE BOT (highest priority, call them)
-2. Else if showing_date is EMPTY AND hours_since_creation < 1 → Send SMS with property details
+1. If showing_date is EMPTY AND hours_since_creation < 1 → Send SMS with property details
+2. If showing_date is EMPTY AND hours_since_creation >= 1 → Send follow-up SMS to book showing
 3. Else if showing_date EXISTS AND date has NOT passed → Skip (wait for showing)
 4. Else if showing_date EXISTS AND date HAS passed with no feedback → Ask "How was the showing?"
-5. Else (customer gave feedback) → Send application link or move to Lost
+5. Else (customer gave feedback) → Send application link ({{ contact.application_link }}) or move to Lost
 
 ACTION GUIDE:
 - "send_sms": Send an SMS message to the customer
 - "update_stage": Move the opportunity to a new stage
 - "send_sms_and_update_stage": Do both — send SMS and update stage
-- "trigger_voice_bot": Add the 'call_for_showing' tag, which triggers GHL workflow to call the customer (for booking showings)
 - "skip": No action needed right now"""
 
 
@@ -385,56 +378,27 @@ async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
     """Send lead context to GPT-4o-mini (with Claude fallback) and get action recommendation."""
     user_prompt = _build_user_prompt(lead_context)
 
-    openai_error = None
-    # Try OpenAI first
-    if OPENAI_API_KEY:
-        try:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "max_tokens": 300,
-                    "temperature": 0.2,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                openai_error = f"OpenAI {resp.status_code}: {resp.text[:300]}"
-            else:
-                text = resp.json()["choices"][0]["message"]["content"]
-                return _parse_ai_response(text)
-        except Exception as e:
-            openai_error = f"OpenAI exception: {str(e)[:200]}"
-
-    # Fallback to Claude Haiku
+    # Use OpenAI (GPT-4o-mini)
     resp = await client.post(
-        "https://api.anthropic.com/v1/messages",
+        "https://api.openai.com/v1/chat/completions",
         headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
         },
         json={
-            "model": "claude-haiku-4-5-20251001",
+            "model": "gpt-4o-mini",
             "max_tokens": 300,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": user_prompt}],
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
         },
         timeout=30,
     )
     if resp.status_code != 200:
-        raise RuntimeError(
-            f"Anthropic {resp.status_code}: {resp.text[:400]} | {openai_error or 'no openai error'}"
-        )
-    text = resp.json()["content"][0]["text"]
+        raise RuntimeError(f"OpenAI {resp.status_code}: {resp.text[:400]}")
+    text = resp.json()["choices"][0]["message"]["content"]
     return _parse_ai_response(text)
 
 
