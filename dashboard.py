@@ -385,6 +385,37 @@ async def api_webhook_inbound(body: dict):
     return JSONResponse(result)
 
 
+@app.get("/api/redirect-data")
+async def api_redirect_data(c: str = ""):
+    """Return contact details for the tpmd.io/go redirect page."""
+    if not c:
+        return JSONResponse({"error": "contact_id required"}, status_code=400)
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            resp = await client.get(
+                f"{GHL_API_BASE}/contacts/{c}",
+                headers={"Authorization": f"Bearer {GHL_API_KEY}", "Version": "2021-07-28", "Accept": "application/json"},
+            )
+            if resp.status_code != 200:
+                return JSONResponse({"error": "contact not found"}, status_code=404)
+            contact = resp.json().get("contact", {})
+            custom = {f["id"]: f["value"] for f in contact.get("customFields", []) if f.get("value")}
+            property_address = ""
+            for field_id, value in custom.items():
+                if field_id == "Vk9hcLmQAaoeLYYPbUUe":
+                    property_address = value
+                    break
+            return JSONResponse({
+                "first_name": contact.get("firstName", ""),
+                "last_name": contact.get("lastName", ""),
+                "email": contact.get("email", ""),
+                "phone": contact.get("phone", ""),
+                "property_address": property_address,
+            }, headers={"Access-Control-Allow-Origin": "*"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/webhook-log")
 async def api_webhook_log():
     """Get recent webhook activity for debugging."""

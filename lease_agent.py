@@ -134,6 +134,19 @@ def parse_custom_fields(custom_fields: list[dict]) -> dict:
     return result
 
 
+
+def _build_id_url(contact: dict, property_address: str = "") -> str:
+    """Build branded short URL via tpmd.io/go redirect page."""
+    contact_id = contact.get("id", "")
+    return f"https://tpmd.io/go?c={contact_id}&t=id"
+
+
+def _build_reschedule_url(contact: dict, property_address: str = "") -> str:
+    """Build branded short URL via tpmd.io/go redirect page."""
+    contact_id = contact.get("id", "")
+    return f"https://tpmd.io/go?c={contact_id}&t=book"
+
+
 async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
     """Pull contact details and recent messages for an opportunity."""
     contact_id = opp["contactId"]
@@ -199,6 +212,8 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "property_summary": custom.get("property_summary", "")[:200],
         "recent_messages": messages[:10],
         "current_time": now.isoformat(),
+        "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
+        "reschedule_url": _build_reschedule_url(contact, custom.get("property_address", "")),
     }
 
 
@@ -272,7 +287,7 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
 
 **Reschedule Requests:**
 - If "Can't make it Thursday": Offer new time OR send reschedule link
-- Message: "No problem! Would {{date}} work instead? Or here's a link to pick your time: {{trigger_link.Y138P5DnMSDymQq16ycP}}"
+- Message: "No problem! Here's a link to pick a new time: [Reschedule Link]"
 - Update showing_date once confirmed
 
 **Cancellations:**
@@ -287,16 +302,16 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
 - Background check handling: Ignore anything before 2019 (unless criminal). For post-2019: "We'll verify with the property owner"
 
 **ID Verification Reminders:**
-- Use trigger link when nudging for ID upload: {{trigger_link.KQTTQsfA7QlIQs66jjbl}}
-- Example: "Hi [name], to move forward we need your ID. Upload here: {{trigger_link.KQTTQsfA7QlIQs66jjbl}} (takes 1 min)"
+- Use the ID Verification Link field from the lead data (it's a pre-filled URL)
+- Example: "Hi [name], to move forward we need your ID. Upload here: [ID Verification Link] (takes 1 min)"
 
 **Property Questions:**
 - Answer from: property_address, property_headline, special_offer, property_summary
 - If asked about background/history: Follow background check policy above
 
-**Trigger Links (prettier, shorter in SMS):**
-- ID Verification: {{trigger_link.KQTTQsfA7QlIQs66jjbl}}
-- Reschedule Tour: {{trigger_link.Y138P5DnMSDymQq16ycP}}
+**Links to use in SMS:**
+- ID Verification: use the "ID Verification Link" field (already pre-filled, short URL)
+- Reschedule Tour: use the "Reschedule Link" field (already pre-filled, short URL)
 - Send Code/Access: {{trigger_link.5IDHUuj9VVY8x02kY2j}}
 
 **Application Link:**
@@ -365,6 +380,8 @@ ID Verification: {lead_context['id_status'] or 'Not done'}
 Lock Code Issued: {'Yes' if lead_context['lock_code'] else 'No'}
 Showing Date: {lead_context['showing_date'] or 'Not scheduled'}
 Application URL: {'Sent' if lead_context['application_url'] else 'Not sent'}
+ID Verification Link: {lead_context['id_verification_url']}
+Reschedule Link: {lead_context['reschedule_url']}
 Tags: {', '.join(lead_context['tags']) if lead_context['tags'] else 'None'}
 DND: {lead_context['dnd']}
 Special Offer: {lead_context['special_offer'] or 'None'}
