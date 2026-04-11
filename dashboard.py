@@ -59,8 +59,10 @@ async def logo2():
 # Voice bot workflow — will be connected once added to GHL workflow
 VOICE_BOT_AGENT_ID = "69d658fa4ccb41abc9c6f543"
 
-# Periodic scheduler (starts in dry-run mode)
-scheduler = PeriodicScheduler(dry_run=True)
+# Periodic scheduler (mode set by SCHEDULER_MODE env var)
+import os as _os
+_scheduler_mode = _os.environ.get("SCHEDULER_MODE", "DRY_RUN").upper()
+scheduler = PeriodicScheduler(dry_run=(_scheduler_mode != "LIVE"))
 
 scan_cache: dict = {"leads": [], "scan_time": None, "scanning": False}
 webhook_log: list = []  # Track all webhook calls for debugging
