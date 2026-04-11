@@ -385,6 +385,7 @@ async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
     """Send lead context to GPT-4o-mini (with Claude fallback) and get action recommendation."""
     user_prompt = _build_user_prompt(lead_context)
 
+    openai_error = None
     # Try OpenAI first
     if OPENAI_API_KEY:
         try:
@@ -405,11 +406,13 @@ async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
                 },
                 timeout=30,
             )
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"]
-            return _parse_ai_response(text)
-        except Exception:
-            pass  # Fall through to Claude
+            if resp.status_code != 200:
+                openai_error = f"OpenAI {resp.status_code}: {resp.text[:300]}"
+            else:
+                text = resp.json()["choices"][0]["message"]["content"]
+                return _parse_ai_response(text)
+        except Exception as e:
+            openai_error = f"OpenAI exception: {str(e)[:200]}"
 
     # Fallback to Claude Haiku
     resp = await client.post(
@@ -427,7 +430,10 @@ async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
         },
         timeout=30,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Anthropic {resp.status_code}: {resp.text[:400]} | {openai_error or 'no openai error'}"
+        )
     text = resp.json()["content"][0]["text"]
     return _parse_ai_response(text)
 
