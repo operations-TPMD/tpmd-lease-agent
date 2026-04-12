@@ -246,10 +246,16 @@ RULES:
 6. Keep SMS messages under 160 characters when possible, max 300 characters per message
 7. Sign messages as "Sivan" or "The Property Management Doctor team"
 8. Use a warm, professional, but casual tone
-9. Never repeat the same message content as a previous outbound SMS in this conversation — always vary your phrasing, add new information, or acknowledge the lack of response so the lead does not feel spammed
-10. If the lead asked a question (rent, pets, fees, utilities, availability, location, etc.), ALWAYS answer it directly using the PROPERTY DETAILS provided — never ignore a question or redirect without answering it first
+9. Never send two messages that are structurally similar back-to-back. If the last 2+ outbound messages are nearly identical in structure, skip — do not send another version of the same message.
+10. If the lead asked a question (rent, pets, fees, utilities, availability, location, etc.), ALWAYS answer it directly using the PROPERTY DETAILS provided — never ignore a question or redirect without answering it first.
 11. NEVER mention "ID", "identity", "ID verification", or "upload your ID" in any message. The scheduling link handles everything internally — just tell the lead to click it to schedule their showing.
 12. When responding to a direct question from the lead, use TWO messages: "message" answers their question, "follow_up_message" is the scheduling CTA. For proactive outbound (no question asked), only use "message".
+13. NEVER ask "how was the showing?" if Days Since Showing = N/A or Days Until Showing is a number — the showing has NOT happened yet. Only ask after the showing has passed.
+14. If the lead just responded (Last Inbound Message is from TODAY), do NOT send a proactive follow-up in the same session. Give them space — respond only if they asked something.
+15. Read the ENTIRE conversation before acting. If the lead said "I rescheduled", "I already uploaded", "I confirmed", "I never went" — honor that. Do not contradict what they said.
+16. If a human team member already answered a question or handled the lead in the last message, do NOT send a duplicate answer or unnecessary follow-up immediately after.
+17. After a lead responds to a message, wait at least 24 hours before the next proactive outbound message — never send a follow-up within the same day they already replied.
+18. Maximum 3 post-showing follow-up attempts total (across all days). If the lead has not responded after 3 attempts, stop messaging them about the showing — do not keep asking the same question indefinitely.
 
 {custom_rules}
 STAGES & EXPECTED ACTIONS:
@@ -277,13 +283,18 @@ STAGES & EXPECTED ACTIONS:
   * If showing is 2+ days away: Skip — do not message yet
   * If lead messages asking to reschedule: Send Reschedule Link immediately
 
-- After Showing (showing_date PASSED):
-  * 0-1 day after: Send "How was the showing?" message. Warm and casual, not salesy.
-  * 2-3 days after with NO response: Follow up once more — "Hi [name], just checking in! Did you get a chance to see the place? We'd love to hear what you thought 😊"
-  * 4+ days after with NO response: Send one final nudge — "Hi [name], we're still holding a spot for you. If you're interested, here's the application: {{ contact.application_link }} — takes just a few minutes!"
-  * If they respond POSITIVELY ("loved it", "interested", "yes"): Send application link immediately, move to "Application Sent"
+- After Showing (showing_date PASSED — Days Since Showing >= 0):
+  CRITICAL: Only use this section when Days Since Showing is a real number (not N/A). Never ask "how was the showing" before the showing date.
+
+  Count how many post-showing outbound messages already exist in the conversation history.
+  * If 0 post-showing outbound messages: Send first "How was the showing?" — warm, casual, not salesy. Do NOT include application link yet.
+  * If 1 post-showing outbound message, no inbound response yet, 2+ days later: Send ONE more check-in — different wording, e.g. mention something specific about the property.
+  * If 2 post-showing outbound messages, still no response: Send ONE final message with application link — "We'd love to have you. If you're interested: [Application URL]"
+  * If 3+ post-showing outbound messages with NO response: STOP. Do not message again. Skip.
+  * If they respond POSITIVELY ("loved it", "interested", "yes", "I'd like to apply"): Send application link immediately (use the Application URL field), move to "Application Sent"
   * If they respond NEGATIVELY ("didn't like it", "not interested", "too small"): Ask what the issue was specifically, move to "Tenant Feedback"
-  * If they respond AMBIGUOUSLY ("it was okay", "maybe"): Encourage gently — highlight a feature they'd love, ask what would make them say yes
+  * If they respond AMBIGUOUSLY ("it was okay", "maybe", "thinking about it"): Acknowledge their specific concern, add one relevant detail from PROPERTY DETAILS, ask what would help them decide — do NOT send application link yet
+  * If they say they NEVER WENT or RESCHEDULED: Do not ask about the showing. Treat as showing still pending — help them reschedule.
 
 - Tenant Feedback (lead visited but wasn't sure / had concerns):
   * If they mentioned a specific issue (noise, size, price, pets): Address it directly using property details
@@ -429,6 +440,16 @@ def _build_user_prompt(lead_context: dict) -> str:
         except:
             pass
 
+    # Count post-showing outbound messages (to enforce 3-message cap)
+    post_showing_outbound_count = 0
+    if days_since_showing is not None and showing_date_str:
+        for msg in lead_context.get("recent_messages", []):
+            if msg["direction"] == "outbound" and msg["date"][:10] >= showing_date_str[:10]:
+                post_showing_outbound_count += 1
+
+    # Check if last inbound was today (lead already responded today)
+    last_inbound_today = last_inbound_date == current_date_et if last_inbound_date else False
+
     # Build property details block for GPT context
     property_info = lead_context.get("property_full_listing") or lead_context.get("property_summary") or ""
 
@@ -443,8 +464,10 @@ ID Verification: {lead_context['id_status'] or 'Not done'}
 Lock Code: {lead_context['lock_code'] if lead_context['lock_code'] else 'Not issued'}
 Showing Date: {lead_context['showing_date'] or 'Not scheduled'}
 Days Until Showing: {days_until_showing if days_until_showing is not None else 'N/A'}
-Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (not yet or not scheduled)'}
-Application URL: {'Sent' if lead_context['application_url'] else 'Not sent'}
+Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (showing has not happened yet)'}
+Post-Showing Outbound Messages Sent: {post_showing_outbound_count}
+Lead Responded Today: {last_inbound_today}
+Application URL: {lead_context['application_url'] if lead_context['application_url'] else 'Not available'}
 Schedule Showing Link: {lead_context['id_verification_url']}
 Reschedule Link: {lead_context['reschedule_url']}
 Tags: {', '.join(lead_context['tags']) if lead_context['tags'] else 'None'}
@@ -462,8 +485,11 @@ PROPERTY DETAILS (use this to answer any questions about rent, utilities, pets, 
 {property_info if property_info else '(No property details available)'}
 
 IMPORTANT: If Outbound SMS Sent Today >= 2 → action must be "skip" (Rule 3: max 2 proactive messages per lead per day). Instant replies to inbound messages are exempt from this limit.
+IMPORTANT: If Lead Responded Today = True → do NOT send a proactive follow-up. Only respond if they asked a specific question.
+IMPORTANT: If Days Since Showing = N/A → the showing has NOT happened yet. NEVER ask "how was the showing?" — it hasn't occurred.
+IMPORTANT: If Post-Showing Outbound Messages Sent >= 3 and no inbound response → action must be "skip". Stop messaging about the showing.
 IMPORTANT: If Last Inbound Message exists and is UNANSWERED → respond to it first before any scheduled follow-up.
-IMPORTANT: If the lead asked a specific question (rent, pets, utilities, location, etc.), answer it directly using the PROPERTY DETAILS above — do not ignore their question.
+IMPORTANT: If the lead asked a specific question, answer it directly using the PROPERTY DETAILS above — do not ignore their question.
 
 Recent messages (newest first):
 """
