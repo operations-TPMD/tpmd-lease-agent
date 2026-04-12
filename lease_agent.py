@@ -209,7 +209,9 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "showing_date": showing_date,
         "application_url": custom.get("application_url", ""),
         "special_offer": custom.get("special_offer", ""),
-        "property_summary": custom.get("property_summary", "")[:200],
+        "property_summary": custom.get("property_summary", ""),
+        "property_full_listing": custom.get("property_full_listing", ""),
+        "property_headline": custom.get("property_headline", ""),
         "recent_messages": messages[:10],
         "current_time": now.isoformat(),
         "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
@@ -233,6 +235,7 @@ RULES:
 7. Sign messages as "Sivan" or "The Property Management Doctor team"
 8. Use a warm, professional, but casual tone
 9. Never repeat the same message content as a previous outbound SMS in this conversation — always vary your phrasing, add new information, or acknowledge the lack of response so the lead does not feel spammed
+10. If the lead asked a question (rent, pets, fees, utilities, availability, location, etc.), ALWAYS answer it directly using the PROPERTY DETAILS provided — never ignore a question or redirect without answering it first
 
 STAGES & EXPECTED ACTIONS:
 **CRITICAL LOGIC: If 1+ hours old AND no showing_date → Send SMS follow-up (ignore stage)**
@@ -374,6 +377,9 @@ def _build_user_prompt(lead_context: dict) -> str:
         if msg["direction"] == "outbound" and msg["date"][:10] == current_date_et
     )
 
+    # Build property details block for GPT context
+    property_info = lead_context.get("property_full_listing") or lead_context.get("property_summary") or ""
+
     prompt = f"""Analyze this lead and decide the best action:
 
 Lead: {lead_context['name']}
@@ -398,8 +404,12 @@ Last Inbound Message: {f"{last_inbound_date}: {last_inbound_body}" if last_inbou
 Outbound SMS Sent Today: {outbound_today_count}
 Current Date (ET): {current_date_et}
 
+PROPERTY DETAILS (use this to answer any questions about rent, utilities, pets, fees, availability, etc.):
+{property_info if property_info else '(No property details available)'}
+
 IMPORTANT: If Outbound SMS Sent Today >= 2 → action must be "skip" (Rule 3: max 2 proactive messages per lead per day). Instant replies to inbound messages are exempt from this limit.
 IMPORTANT: If Last Inbound Message exists and is UNANSWERED → respond to it first before any scheduled follow-up.
+IMPORTANT: If the lead asked a specific question (rent, pets, utilities, location, etc.), answer it directly using the PROPERTY DETAILS above — do not ignore their question.
 
 Recent messages (newest first):
 """

@@ -12,6 +12,7 @@ Setup for instant responses:
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -112,6 +113,11 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
 
     if not is_business_hours():
         return {"status": "queued_outside_hours", "contact_id": contact_id}
+
+    # Random delay 5-10 seconds so response feels natural, not instant-bot
+    delay = random.uniform(5, 10)
+    logger.info(f"Inbound message from {contact_id} — waiting {delay:.1f}s before responding")
+    await asyncio.sleep(delay)
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
