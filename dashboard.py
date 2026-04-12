@@ -452,6 +452,31 @@ async def api_webhook_log():
     })
 
 
+BOT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_rules.txt")
+
+@app.get("/api/bot-rules")
+async def api_get_bot_rules():
+    """Return current custom bot rules."""
+    try:
+        with open(BOT_RULES_PATH, "r", encoding="utf-8") as f:
+            return JSONResponse({"rules": f.read()})
+    except FileNotFoundError:
+        return JSONResponse({"rules": ""})
+
+@app.post("/api/bot-rules")
+async def api_set_bot_rules(request: Request):
+    """Save custom bot rules to file (takes effect immediately)."""
+    try:
+        body = await request.json()
+        rules = body.get("rules", "")
+        with open(BOT_RULES_PATH, "w", encoding="utf-8") as f:
+            f.write(rules)
+        logger.info(f"Bot rules updated: {len(rules)} chars")
+        return JSONResponse({"status": "saved", "chars": len(rules)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── Dashboard HTML ───────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -989,7 +1014,51 @@ async function toggleScheduler() {
 load();
 loadScheduler();
 setInterval(loadScheduler, 30000);
+
+// ── Bot Rules ─────────────────────────────────────────────────────────────────
+async function loadBotRules() {
+  const res = await fetch('/api/bot-rules');
+  const data = await res.json();
+  document.getElementById('botRulesText').value = data.rules || '';
+}
+
+async function saveBotRules() {
+  const rules = document.getElementById('botRulesText').value;
+  const btn = document.getElementById('saveRulesBtn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+  const res = await fetch('/api/bot-rules', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rules})
+  });
+  const data = await res.json();
+  btn.textContent = data.status === 'saved' ? '✅ Saved!' : '❌ Error';
+  setTimeout(() => { btn.textContent = 'Save Rules'; btn.disabled = false; }, 2000);
+}
+
+loadBotRules();
 </script>
+
+<!-- Bot Rules Section -->
+<div style="max-width:900px;margin:24px auto;padding:0 16px">
+  <div style="background:white;border-radius:12px;border:1px solid #E2DDF0;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+    <div style="background:linear-gradient(135deg,#7B2FBE,#4C6EF5);padding:14px 20px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <span style="color:white;font-weight:700;font-size:15px">🎓 Bot Education</span>
+        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Custom rules — take effect immediately, no deployment needed</span>
+      </div>
+      <button id="saveRulesBtn" onclick="saveBotRules()" style="background:white;color:#7B2FBE;border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px">Save Rules</button>
+    </div>
+    <div style="padding:16px">
+      <p style="font-size:12px;color:#7B6FA0;margin-bottom:8px">Write one rule per line. Lines starting with # are comments. Examples:<br>
+        <code style="background:#F5F4F8;padding:2px 6px;border-radius:3px;font-size:11px">Never mention competing properties.</code>&nbsp;
+        <code style="background:#F5F4F8;padding:2px 6px;border-radius:3px;font-size:11px">Always mention the free parking when talking about the property.</code>
+      </p>
+      <textarea id="botRulesText" style="width:100%;height:160px;border:1px solid #E2DDF0;border-radius:8px;padding:12px;font-size:13px;font-family:monospace;resize:vertical;color:#1A1035;outline:none" placeholder="# Add custom rules here, one per line...&#10;# Example: Never mention competing properties.&#10;# Example: Always mention the free parking when talking about the property."></textarea>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>"""
 

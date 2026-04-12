@@ -221,7 +221,19 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
 
 # ── Step 3: Ask Claude what to do ────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a lead management assistant for The Property Management Doctor, a property management company in Florida.
+def _load_custom_rules() -> str:
+    """Load user-defined custom rules from bot_rules.txt (if it exists)."""
+    import os
+    rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_rules.txt")
+    if os.path.exists(rules_path):
+        with open(rules_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            return f"\nCUSTOM RULES (defined by property manager — highest priority):\n{content}\n"
+    return ""
+
+
+SYSTEM_PROMPT_BASE = """You are a lead management assistant for The Property Management Doctor, a property management company in Florida.
 
 You analyze lease leads and decide the SINGLE best action to take RIGHT NOW.
 
@@ -231,12 +243,15 @@ RULES:
 3. Maximum 2 proactive outbound SMS per lead per calendar day (ET). This limit does NOT apply to instant responses triggered by an inbound message from the lead — those are always allowed regardless of daily count.
 4. If the lead hasn't responded to 3+ consecutive outbound SMS messages, wait at least 2 days before the next SMS
 5. Always be contextual — reference the specific property, their situation, their name
-6. Keep SMS messages under 160 characters when possible, max 300 characters
+6. Keep SMS messages under 160 characters when possible, max 300 characters per message
 7. Sign messages as "Sivan" or "The Property Management Doctor team"
 8. Use a warm, professional, but casual tone
 9. Never repeat the same message content as a previous outbound SMS in this conversation — always vary your phrasing, add new information, or acknowledge the lack of response so the lead does not feel spammed
 10. If the lead asked a question (rent, pets, fees, utilities, availability, location, etc.), ALWAYS answer it directly using the PROPERTY DETAILS provided — never ignore a question or redirect without answering it first
+11. NEVER mention "ID", "identity", "ID verification", or "upload your ID" in any message. The scheduling link handles everything internally — just tell the lead to click it to schedule their showing.
+12. When responding to a direct question from the lead, use TWO messages: "message" answers their question, "follow_up_message" is the scheduling CTA. For proactive outbound (no question asked), only use "message".
 
+{custom_rules}
 STAGES & EXPECTED ACTIONS:
 **CRITICAL LOGIC: If 1+ hours old AND no showing_date → Send SMS follow-up (ignore stage)**
 
@@ -305,16 +320,17 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
 - Message: "Great! Here's your application: [send the appropriate trigger link]"
 - Background check handling: Ignore anything before 2019 (unless criminal). For post-2019: "We'll verify with the property owner"
 
-**ID Verification Reminders:**
-- Use the ID Verification Link field from the lead data (it's a pre-filled URL)
-- Example: "Hi [name], to move forward we need your ID. Upload here: [ID Verification Link] (takes 1 min)"
+**Scheduling / Booking Link:**
+- Use the "Schedule Showing Link" from the lead data (pre-filled short URL)
+- NEVER say "upload ID" or mention ID at all. Always frame it as scheduling a showing.
+- Example: "Hi [name], ready to see it? Click here to schedule your showing: [Schedule Showing Link]"
 
 **Property Questions:**
-- Answer from: property_address, property_headline, special_offer, property_summary
+- Answer from: PROPERTY DETAILS block in the lead data (rent, utilities, pets, fees, etc.)
 - If asked about background/history: Follow background check policy above
 
 **Links to use in SMS:**
-- ID Verification: use the "ID Verification Link" field (already pre-filled, short URL)
+- Schedule Showing: use the "Schedule Showing Link" field (already pre-filled, short URL)
 - Reschedule Tour: use the "Reschedule Link" field (already pre-filled, short URL)
 - Send Code/Access: {{trigger_link.5IDHUuj9VVY8x02kY2j}}
 
@@ -325,7 +341,8 @@ HANDLING CUSTOMER REQUESTS & FEEDBACK:
 RESPOND WITH EXACTLY THIS JSON FORMAT:
 {
   "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "skip",
-  "message": "SMS text here (only if sending)",
+  "message": "First SMS — direct answer to their question, or proactive outbound message",
+  "follow_up_message": "Second SMS — scheduling CTA (ONLY include this when responding to a direct question from the lead, leave empty string otherwise)",
   "new_stage": "Stage Name (only if updating stage)",
   "reasoning": "Brief explanation of why this action"
 }
@@ -391,7 +408,7 @@ ID Verification: {lead_context['id_status'] or 'Not done'}
 Lock Code Issued: {'Yes' if lead_context['lock_code'] else 'No'}
 Showing Date: {lead_context['showing_date'] or 'Not scheduled'}
 Application URL: {'Sent' if lead_context['application_url'] else 'Not sent'}
-ID Verification Link: {lead_context['id_verification_url']}
+Schedule Showing Link: {lead_context['id_verification_url']}
 Reschedule Link: {lead_context['reschedule_url']}
 Tags: {', '.join(lead_context['tags']) if lead_context['tags'] else 'None'}
 DND: {lead_context['dnd']}
@@ -432,8 +449,9 @@ def _parse_ai_response(text: str) -> dict:
 
 
 async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
-    """Send lead context to GPT-4o-mini (with Claude fallback) and get action recommendation."""
+    """Send lead context to GPT-4o-mini and get action recommendation."""
     user_prompt = _build_user_prompt(lead_context)
+    system_prompt = SYSTEM_PROMPT_BASE.replace("{custom_rules}", _load_custom_rules())
 
     # Use OpenAI (GPT-4o-mini)
     resp = await client.post(
@@ -444,10 +462,10 @@ async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
         },
         json={
             "model": "gpt-4o-mini",
-            "max_tokens": 300,
+            "max_tokens": 400,
             "temperature": 0.2,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         },

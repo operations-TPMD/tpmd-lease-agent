@@ -1,0 +1,5 @@
+# Custom Bot Rules — edited by property manager
+# Each line is a rule. Lines starting with # are comments and are ignored.
+# Changes here take effect immediately — no deployment needed.
+# Example: "Never mention competing properties."
+

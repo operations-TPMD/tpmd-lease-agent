@@ -163,6 +163,7 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
             decision = await ask_claude(client, lead)
             action = decision.get("action", "skip")
 
+            follow_up = decision.get("follow_up_message", "")
             result = {
                 "status": "processed",
                 "contact_id": contact_id,
@@ -170,6 +171,7 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                 "stage": stage_name,
                 "action": action,
                 "message": decision.get("message", ""),
+                "follow_up_message": follow_up,
                 "new_stage": decision.get("new_stage", ""),
                 "reasoning": decision.get("reasoning", ""),
             }
@@ -179,6 +181,11 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                     if decision.get("message"):
                         await send_sms(client, contact_id, decision["message"])
                         result["sms_sent"] = True
+                    # Send follow-up SMS (answer to question) after short delay
+                    if follow_up:
+                        await asyncio.sleep(random.uniform(3, 6))
+                        await send_sms(client, contact_id, follow_up)
+                        result["follow_up_sent"] = True
 
                 if action in ("update_stage", "send_sms_and_update_stage"):
                     if decision.get("new_stage"):
