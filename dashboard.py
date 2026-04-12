@@ -359,8 +359,23 @@ async def api_webhook_inbound(request: Request):
         logger.error(f"Failed to parse webhook JSON: {e}")
         return JSONResponse({"error": f"Invalid JSON: {str(e)[:100]}"}, status_code=400)
 
-    contact_id = body.get("contact_id") or body.get("contactId") or body.get("contact", {}).get("id", "")
-    message = body.get("message", "")
+    # Log the raw payload first so we can see exactly what GHL sends
+    logger.info(f"Webhook raw payload: {json.dumps(body)[:500]}")
+
+    contact_id = (
+        body.get("contact_id")
+        or body.get("contactId")
+        or body.get("contact", {}).get("id", "")
+        if isinstance(body, dict) else ""
+    )
+
+    # GHL may send message as a string, dict, or nested object — extract safely
+    raw_message = body.get("message", "") if isinstance(body, dict) else ""
+    if isinstance(raw_message, dict):
+        # e.g. {"body": "Hello", "type": "SMS"}
+        message = raw_message.get("body") or raw_message.get("text") or str(raw_message)
+    else:
+        message = str(raw_message) if raw_message is not None else ""
 
     # Log the webhook call
     log_entry = {
