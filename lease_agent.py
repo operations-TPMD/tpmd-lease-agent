@@ -272,18 +272,30 @@ STAGES & EXPECTED ACTIONS:
 - ID Rejected:
   * 1+ hours, no showing: TRIGGER VOICE BOT (book showing anyway if eligible)
   * Explain issue, ask to re-upload or disqualify
-- Showing Scheduled:
-  * If showing date NOT passed: No action yet
-  * If showing date PASSED, no feedback yet (1+ days): Ask "How was the showing?"
-  * If they say yes/interested: Send application link, move to "Application Sent"
-  * If they say no/not interested: Ask what the issue was, move to "Tenant Feedback"
+- Showing Scheduled (showing_date EXISTS and NOT passed yet):
+  * If showing is TODAY or TOMORROW: Send a friendly reminder with the address and any access details (lock code if available). Example: "Hi [name], just a reminder — your showing is [today/tomorrow] at [address]! 🏠 Let us know if you need anything."
+  * If showing is 2+ days away: Skip — do not message yet
+  * If lead messages asking to reschedule: Send Reschedule Link immediately
 
-- Tenant Feedback:
-  * If positive: Send application link
-  * If negative: Acknowledge and offer alternatives or move to Lost
+- After Showing (showing_date PASSED):
+  * 0-1 day after: Send "How was the showing?" message. Warm and casual, not salesy.
+  * 2-3 days after with NO response: Follow up once more — "Hi [name], just checking in! Did you get a chance to see the place? We'd love to hear what you thought 😊"
+  * 4+ days after with NO response: Send one final nudge — "Hi [name], we're still holding a spot for you. If you're interested, here's the application: {{ contact.application_link }} — takes just a few minutes!"
+  * If they respond POSITIVELY ("loved it", "interested", "yes"): Send application link immediately, move to "Application Sent"
+  * If they respond NEGATIVELY ("didn't like it", "not interested", "too small"): Ask what the issue was specifically, move to "Tenant Feedback"
+  * If they respond AMBIGUOUSLY ("it was okay", "maybe"): Encourage gently — highlight a feature they'd love, ask what would make them say yes
+
+- Tenant Feedback (lead visited but wasn't sure / had concerns):
+  * If they mentioned a specific issue (noise, size, price, pets): Address it directly using property details
+  * If pets were the issue and pets ARE allowed: Clarify pet policy from PROPERTY DETAILS
+  * If it's a price concern: Mention what's included (utilities, parking, etc.)
+  * If genuinely not interested: Acknowledge warmly, move to Lost
+  * If positive after addressing concern: Send application link
 
 - Application Sent:
-  * Follow up on status in 3-5 days
+  * Day 3: "Hi [name], just checking — did you get a chance to start the application? Happy to help if you have questions 😊"
+  * Day 5-6: "Hi [name], quick reminder — your application is still waiting! The unit is in high demand. [application link]"
+  * Day 7+: One final reminder, then stop following up on application
 
 - Leased / Won:
   * No action needed
@@ -348,11 +360,17 @@ RESPOND WITH EXACTLY THIS JSON FORMAT:
 }
 
 DECISION TREE (APPLY THIS FIRST):
-1. If showing_date is EMPTY AND hours_since_creation < 1 → Send SMS with property details
+1. If showing_date is EMPTY AND hours_since_creation < 1 → Send initial SMS with property details
 2. If showing_date is EMPTY AND hours_since_creation >= 1 → Send follow-up SMS to book showing
-3. Else if showing_date EXISTS AND date has NOT passed → Skip (wait for showing)
-4. Else if showing_date EXISTS AND date HAS passed with no feedback → Ask "How was the showing?"
-5. Else (customer gave feedback) → Send application link ({{ contact.application_link }}) or move to Lost
+3. If showing_date EXISTS AND date is TODAY or TOMORROW → Send showing reminder with address + lock code if available
+4. If showing_date EXISTS AND date is 2+ days away → Skip (no message needed yet)
+5. If showing_date EXISTS AND date HAS passed:
+   a. 0-1 days after → Ask "How was the showing?" (warm, casual)
+   b. 2-3 days after, no response → Second check-in
+   c. 4+ days after, no response → Final nudge with application link
+   d. Lead responded positively → Send application link, move to Application Sent
+   e. Lead responded negatively → Ask what the issue was, move to Tenant Feedback
+6. If stage is Application Sent → Follow up on application status based on days elapsed since last message
 
 ACTION GUIDE:
 - "send_sms": Send an SMS message to the customer
@@ -394,6 +412,23 @@ def _build_user_prompt(lead_context: dict) -> str:
         if msg["direction"] == "outbound" and msg["date"][:10] == current_date_et
     )
 
+    # Calculate days since/until showing
+    showing_date_str = lead_context.get("showing_date", "")
+    days_since_showing = None
+    days_until_showing = None
+    if showing_date_str:
+        try:
+            from datetime import datetime as dt_class, date as date_class
+            showing = dt_class.strptime(showing_date_str[:10], "%Y-%m-%d").date()
+            today = date_class.fromisoformat(current_date_et)
+            diff = (today - showing).days  # positive = past, negative = future
+            if diff >= 0:
+                days_since_showing = diff
+            else:
+                days_until_showing = abs(diff)
+        except:
+            pass
+
     # Build property details block for GPT context
     property_info = lead_context.get("property_full_listing") or lead_context.get("property_summary") or ""
 
@@ -405,8 +440,10 @@ Current Stage: {lead_context['stage']}
 Opportunity Status: {lead_context['opp_status']}
 Property: {lead_context['property_address'] or 'Not specified'}
 ID Verification: {lead_context['id_status'] or 'Not done'}
-Lock Code Issued: {'Yes' if lead_context['lock_code'] else 'No'}
+Lock Code: {lead_context['lock_code'] if lead_context['lock_code'] else 'Not issued'}
 Showing Date: {lead_context['showing_date'] or 'Not scheduled'}
+Days Until Showing: {days_until_showing if days_until_showing is not None else 'N/A'}
+Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (not yet or not scheduled)'}
 Application URL: {'Sent' if lead_context['application_url'] else 'Not sent'}
 Schedule Showing Link: {lead_context['id_verification_url']}
 Reschedule Link: {lead_context['reschedule_url']}
