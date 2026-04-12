@@ -113,42 +113,42 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
     if not is_business_hours():
         return {"status": "queued_outside_hours", "contact_id": contact_id}
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Find the contact's opportunity in the lease pipeline
-        resp = await client.get(
-            f"{GHL_API_BASE}/contacts/{contact_id}",
-            headers=ghl_headers(),
-        )
-        if resp.status_code != 200:
-            return {"status": "error", "message": "Contact not found"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Find the contact's opportunity in the lease pipeline
+            resp = await client.get(
+                f"{GHL_API_BASE}/contacts/{contact_id}",
+                headers=ghl_headers(),
+            )
+            if resp.status_code != 200:
+                return {"status": "error", "message": "Contact not found"}
 
-        # Search for their opportunity
-        opps_resp = await client.get(
-            f"{GHL_API_BASE}/opportunities/search",
-            headers=ghl_headers(),
-            params={
-                "location_id": GHL_LOCATION_ID,
-                "pipeline_id": "DVv60aGSOc7XtIofy4Pn",
-                "contact_id": contact_id,
-                "limit": 1,
-            },
-        )
+            # Search for their opportunity
+            opps_resp = await client.get(
+                f"{GHL_API_BASE}/opportunities/search",
+                headers=ghl_headers(),
+                params={
+                    "location_id": GHL_LOCATION_ID,
+                    "pipeline_id": "DVv60aGSOc7XtIofy4Pn",
+                    "contact_id": contact_id,
+                    "limit": 1,
+                },
+            )
 
-        if opps_resp.status_code != 200:
-            return {"status": "error", "message": "Opportunity search failed"}
+            if opps_resp.status_code != 200:
+                return {"status": "error", "message": "Opportunity search failed"}
 
-        opps = opps_resp.json().get("opportunities", [])
-        if not opps:
-            return {"status": "no_opportunity", "contact_id": contact_id}
+            opps = opps_resp.json().get("opportunities", [])
+            if not opps:
+                return {"status": "no_opportunity", "contact_id": contact_id}
 
-        opp = opps[0]
-        stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "Unknown")
+            opp = opps[0]
+            stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "Unknown")
 
-        # Skip terminal stages
-        if stage_name in ("Leased / Won", "Lost") or opp.get("status") == "lost":
-            return {"status": "skipped", "reason": f"Lead in {stage_name}"}
+            # Skip terminal stages
+            if stage_name in ("Leased / Won", "Lost") or opp.get("status") == "lost":
+                return {"status": "skipped", "reason": f"Lead in {stage_name}"}
 
-        try:
             lead = await enrich_lead(client, opp)
 
             if lead["dnd"]:
@@ -181,8 +181,9 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
 
             return result
 
-        except Exception as e:
-            return {"status": "error", "message": str(e)[:200]}
+    except Exception as e:
+        logger.error(f"Error in handle_inbound for contact {contact_id}: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)[:200]}
 
 
 class PeriodicScheduler:

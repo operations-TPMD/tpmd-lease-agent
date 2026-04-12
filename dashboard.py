@@ -22,7 +22,7 @@ from datetime import datetime, timezone, timedelta
 import base64
 import httpx
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -38,6 +38,7 @@ from response_engine import PeriodicScheduler, handle_inbound, is_business_hours
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+logger = logging.getLogger("dashboard")
 
 app = FastAPI()
 
@@ -343,7 +344,7 @@ async def api_scheduler_toggle():
 
 
 @app.post("/api/webhook/inbound")
-async def api_webhook_inbound(body: dict):
+async def api_webhook_inbound(request: Request):
     """Webhook for GHL to call on inbound messages.
     Expects: {"contact_id": "xxx", "message": "optional body"}
 
@@ -352,6 +353,12 @@ async def api_webhook_inbound(body: dict):
     2. Action: Webhook → POST http://YOUR_SERVER:8000/api/webhook/inbound
     3. Body: {"contact_id": "{{contact.id}}", "message": "{{message.body}}"}
     """
+    try:
+        body = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse webhook JSON: {e}")
+        return JSONResponse({"error": f"Invalid JSON: {str(e)[:100]}"}, status_code=400)
+
     contact_id = body.get("contact_id") or body.get("contactId") or body.get("contact", {}).get("id", "")
     message = body.get("message", "")
 
@@ -366,14 +373,19 @@ async def api_webhook_inbound(body: dict):
     if not contact_id:
         log_entry["status"] = "error: no contact_id"
         webhook_log.append(log_entry)
+        logger.warning(f"Webhook received with no contact_id. Body: {body}")
         return JSONResponse({"error": "contact_id required"}, status_code=400)
+
+    logger.info(f"Webhook received for contact {contact_id}, message: {message[:50]}")
 
     # Use scheduler's dry_run setting
     try:
         result = await handle_inbound(contact_id, message, dry_run=scheduler.dry_run)
+        logger.info(f"handle_inbound returned: {result}")
         log_entry["status"] = result.get("status", "processed")
         log_entry["action"] = result.get("action", "skip")
     except Exception as e:
+        logger.exception(f"Error in handle_inbound: {e}")
         log_entry["status"] = f"error: {str(e)[:50]}"
         result = {"status": "error", "message": str(e)[:200]}
 
