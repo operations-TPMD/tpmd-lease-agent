@@ -399,6 +399,9 @@ async def api_webhook_inbound(request: Request):
         logger.info(f"handle_inbound returned: {result}")
         log_entry["status"] = result.get("status", "processed")
         log_entry["action"] = result.get("action", "skip")
+        log_entry["bot_message"] = result.get("message", "")
+        log_entry["bot_follow_up"] = result.get("follow_up_message", "")
+        log_entry["lead_name"] = result.get("name", "")
     except Exception as e:
         logger.exception(f"Error in handle_inbound: {e}")
         log_entry["status"] = f"error: {str(e)[:50]}"
@@ -473,6 +476,30 @@ async def api_set_bot_rules(request: Request):
             f.write(rules)
         logger.info(f"Bot rules updated: {len(rules)} chars")
         return JSONResponse({"status": "saved", "chars": len(rules)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/bot-feedback")
+async def api_bot_feedback(request: Request):
+    """Append message feedback as a rule to bot_rules.txt."""
+    try:
+        body = await request.json()
+        inbound = body.get("inbound", "")
+        bot_msg = body.get("bot_message", "")
+        feedback = body.get("feedback", "")
+        rating = body.get("rating", "bad")  # "good" or "bad"
+
+        if rating == "bad" and feedback:
+            # Convert feedback into a concrete rule and append to file
+            from datetime import datetime as dt
+            timestamp = dt.now().strftime("%Y-%m-%d %H:%M")
+            rule_line = f"\n# Feedback [{timestamp}] — Lead said: \"{inbound[:80]}\" → Bot replied: \"{bot_msg[:80]}\"\n# Issue: {feedback}\n{feedback}\n"
+            with open(BOT_RULES_PATH, "a", encoding="utf-8") as f:
+                f.write(rule_line)
+            logger.info(f"Feedback rule appended: {feedback[:80]}")
+            return JSONResponse({"status": "saved"})
+        return JSONResponse({"status": "skipped"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -682,7 +709,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <span class="scan-time" id="scanTime"></span>
+    <button class="btn btn-outline" style="color:white;border-color:rgba(255,255,255,0.4)" onclick="openTrainModal()">🎓 Train Bot</button>
     <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan All Leads</button>
+  </div>
+</div>
+
+<!-- Train Bot Modal -->
+<div id="trainModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow:auto">
+  <div style="background:white;max-width:680px;margin:40px auto;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <!-- Modal header -->
+    <div style="background:linear-gradient(135deg,#7B2FBE,#4C6EF5);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <span style="color:white;font-weight:700;font-size:16px">🎓 Train Bot</span>
+        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Changes take effect immediately</span>
+      </div>
+      <button onclick="closeTrainModal()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+    </div>
+    <!-- Tabs -->
+    <div style="display:flex;border-bottom:1px solid #E2DDF0">
+      <button id="tabRules" onclick="switchTab('rules')" style="flex:1;padding:12px;border:none;background:white;font-weight:600;font-size:13px;cursor:pointer;border-bottom:3px solid #7B2FBE;color:#7B2FBE">📋 Custom Rules</button>
+      <button id="tabFeedback" onclick="switchTab('feedback')" style="flex:1;padding:12px;border:none;background:white;font-weight:500;font-size:13px;cursor:pointer;border-bottom:3px solid transparent;color:#7B6FA0">💬 Message Feedback</button>
+    </div>
+    <!-- Rules tab -->
+    <div id="panelRules" style="padding:20px">
+      <p style="font-size:12px;color:#7B6FA0;margin-bottom:10px">Write one rule per line. These become permanent instructions for the bot.</p>
+      <p style="font-size:11px;color:#B0A8CC;margin-bottom:10px">Examples: <code style="background:#F5F4F8;padding:1px 5px;border-radius:3px">Always mention that parking is free.</code> &nbsp; <code style="background:#F5F4F8;padding:1px 5px;border-radius:3px">Never mention competing properties.</code></p>
+      <textarea id="botRulesText" style="width:100%;height:200px;border:1px solid #E2DDF0;border-radius:8px;padding:12px;font-size:13px;font-family:monospace;resize:vertical;color:#1A1035;outline:none;line-height:1.6" placeholder="# Add custom rules here, one per line..."></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:12px">
+        <button id="saveRulesBtn" onclick="saveBotRules()" style="background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:8px 22px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">Save Rules</button>
+      </div>
+    </div>
+    <!-- Feedback tab -->
+    <div id="panelFeedback" style="display:none;padding:20px">
+      <p style="font-size:12px;color:#7B6FA0;margin-bottom:14px">Rate recent bot responses. When you click ❌ you can explain what was wrong — it becomes a rule automatically.</p>
+      <div id="feedbackList" style="display:flex;flex-direction:column;gap:10px;max-height:420px;overflow-y:auto">
+        <div style="color:#B0A8CC;font-size:13px;text-align:center;padding:30px">Loading recent messages…</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1015,7 +1078,30 @@ load();
 loadScheduler();
 setInterval(loadScheduler, 30000);
 
-// ── Bot Rules ─────────────────────────────────────────────────────────────────
+// ── Train Bot Modal ───────────────────────────────────────────────────────────
+function openTrainModal() {
+  document.getElementById('trainModal').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+  loadBotRules();
+}
+function closeTrainModal() {
+  document.getElementById('trainModal').style.display = 'none';
+  document.body.style.overflow = '';
+}
+document.getElementById('trainModal').addEventListener('click', function(e) {
+  if (e.target === this) closeTrainModal();
+});
+
+function switchTab(tab) {
+  document.getElementById('panelRules').style.display = tab === 'rules' ? 'block' : 'none';
+  document.getElementById('panelFeedback').style.display = tab === 'feedback' ? 'block' : 'none';
+  document.getElementById('tabRules').style.borderBottomColor = tab === 'rules' ? '#7B2FBE' : 'transparent';
+  document.getElementById('tabRules').style.color = tab === 'rules' ? '#7B2FBE' : '#7B6FA0';
+  document.getElementById('tabFeedback').style.borderBottomColor = tab === 'feedback' ? '#7B2FBE' : 'transparent';
+  document.getElementById('tabFeedback').style.color = tab === 'feedback' ? '#7B2FBE' : '#7B6FA0';
+  if (tab === 'feedback') loadFeedbackList();
+}
+
 async function loadBotRules() {
   const res = await fetch('/api/bot-rules');
   const data = await res.json();
@@ -1027,8 +1113,7 @@ async function saveBotRules() {
   const btn = document.getElementById('saveRulesBtn');
   btn.textContent = 'Saving…'; btn.disabled = true;
   const res = await fetch('/api/bot-rules', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({rules})
   });
   const data = await res.json();
@@ -1036,29 +1121,61 @@ async function saveBotRules() {
   setTimeout(() => { btn.textContent = 'Save Rules'; btn.disabled = false; }, 2000);
 }
 
-loadBotRules();
-</script>
-
-<!-- Bot Rules Section -->
-<div style="max-width:900px;margin:24px auto;padding:0 16px">
-  <div style="background:white;border-radius:12px;border:1px solid #E2DDF0;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
-    <div style="background:linear-gradient(135deg,#7B2FBE,#4C6EF5);padding:14px 20px;display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <span style="color:white;font-weight:700;font-size:15px">🎓 Bot Education</span>
-        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Custom rules — take effect immediately, no deployment needed</span>
+async function loadFeedbackList() {
+  const res = await fetch('/api/webhook-log');
+  const data = await res.json();
+  const entries = (data.recent || []).filter(e => e.bot_message).reverse();
+  const el = document.getElementById('feedbackList');
+  if (!entries.length) {
+    el.innerHTML = '<div style="color:#B0A8CC;font-size:13px;text-align:center;padding:30px">No bot responses yet. Messages will appear here after the bot replies to leads.</div>';
+    return;
+  }
+  el.innerHTML = entries.map((e, i) => `
+    <div id="fb${i}" style="border:1px solid #E2DDF0;border-radius:10px;padding:14px;background:#FAFAF9">
+      <div style="font-size:11px;color:#B0A8CC;margin-bottom:6px">${e.timestamp?.slice(0,16).replace('T',' ')} · ${e.lead_name || e.contact_id}</div>
+      ${e.message ? `<div style="background:#F0FDF4;border-left:3px solid #10B981;padding:8px 10px;border-radius:4px;font-size:12px;color:#065F46;margin-bottom:6px">🙋 Lead: "${e.message}"</div>` : ''}
+      <div style="background:#EFF6FF;border-left:3px solid #3B82F6;padding:8px 10px;border-radius:4px;font-size:12px;color:#1E3A5F;margin-bottom:8px">🤖 Bot: "${e.bot_message}"</div>
+      ${e.bot_follow_up ? `<div style="background:#EFF6FF;border-left:3px solid #3B82F6;padding:8px 10px;border-radius:4px;font-size:12px;color:#1E3A5F;margin-bottom:8px">🤖 Follow-up: "${e.bot_follow_up}"</div>` : ''}
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="rateFeedback(${i},'good')" style="background:#D1FAE5;color:#065F46;border:none;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">👍 Good</button>
+        <button onclick="rateFeedback(${i},'bad')" style="background:#FEE2E2;color:#991B1B;border:none;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">❌ Needs Fix</button>
       </div>
-      <button id="saveRulesBtn" onclick="saveBotRules()" style="background:white;color:#7B2FBE;border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px">Save Rules</button>
+      <div id="fbtxt${i}" style="display:none;margin-top:10px">
+        <textarea id="fbinput${i}" placeholder="What should the bot have said/done differently?" style="width:100%;height:70px;border:1px solid #E2DDF0;border-radius:6px;padding:8px;font-size:12px;resize:none;outline:none"></textarea>
+        <button onclick="submitFeedback(${i})" style="margin-top:6px;background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">Add as Rule</button>
+      </div>
     </div>
-    <div style="padding:16px">
-      <p style="font-size:12px;color:#7B6FA0;margin-bottom:8px">Write one rule per line. Lines starting with # are comments. Examples:<br>
-        <code style="background:#F5F4F8;padding:2px 6px;border-radius:3px;font-size:11px">Never mention competing properties.</code>&nbsp;
-        <code style="background:#F5F4F8;padding:2px 6px;border-radius:3px;font-size:11px">Always mention the free parking when talking about the property.</code>
-      </p>
-      <textarea id="botRulesText" style="width:100%;height:160px;border:1px solid #E2DDF0;border-radius:8px;padding:12px;font-size:13px;font-family:monospace;resize:vertical;color:#1A1035;outline:none" placeholder="# Add custom rules here, one per line...&#10;# Example: Never mention competing properties.&#10;# Example: Always mention the free parking when talking about the property."></textarea>
-    </div>
-  </div>
-</div>
+  `).join('');
+  // store entries for later use
+  window._feedbackEntries = entries;
+}
 
+function rateFeedback(i, rating) {
+  if (rating === 'good') {
+    document.getElementById(`fb${i}`).style.opacity = '0.5';
+    document.getElementById(`fbtxt${i}`).style.display = 'none';
+  } else {
+    document.getElementById(`fbtxt${i}`).style.display = 'block';
+    document.getElementById(`fbinput${i}`).focus();
+  }
+}
+
+async function submitFeedback(i) {
+  const entry = window._feedbackEntries[i];
+  const feedback = document.getElementById(`fbinput${i}`).value.trim();
+  if (!feedback) return;
+  await fetch('/api/bot-feedback', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      inbound: entry.message || '',
+      bot_message: entry.bot_message || '',
+      feedback, rating: 'bad'
+    })
+  });
+  document.getElementById(`fb${i}`).style.background = '#FEF2F2';
+  document.getElementById(`fbtxt${i}`).innerHTML = '<div style="color:#059669;font-size:12px;font-weight:600">✅ Rule added! Bot will avoid this in future messages.</div>';
+}
+</script>
 </body>
 </html>"""
 
