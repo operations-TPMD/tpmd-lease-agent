@@ -322,7 +322,7 @@ async def api_scheduler_status():
     return JSONResponse({
         "running": scheduler.running,
         "dry_run": scheduler.dry_run,
-        "interval_seconds": 7200,
+        "interval_seconds": 10800,
         "last_run": scheduler.last_run,
         "last_result_summary": {
             "actions": scheduler.last_result.get("actions", 0),

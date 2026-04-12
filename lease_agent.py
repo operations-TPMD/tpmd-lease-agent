@@ -226,12 +226,13 @@ You analyze lease leads and decide the SINGLE best action to take RIGHT NOW.
 RULES:
 1. Never send a message if the lead has DND (do not disturb) enabled
 2. Never send promotional messages to leads who were rejected for a specific reason (e.g., pet policy) — instead mark them Lost
-3. If the last outbound message was sent TODAY (same calendar day ET), do NOT send another SMS — one message per lead per day maximum
+3. Maximum 2 proactive outbound SMS per lead per calendar day (ET). This limit does NOT apply to instant responses triggered by an inbound message from the lead — those are always allowed regardless of daily count.
 4. If the lead hasn't responded to 3+ consecutive outbound SMS messages, wait at least 2 days before the next SMS
 5. Always be contextual — reference the specific property, their situation, their name
 6. Keep SMS messages under 160 characters when possible, max 300 characters
 7. Sign messages as "Sivan" or "The Property Management Doctor team"
 8. Use a warm, professional, but casual tone
+9. Never repeat the same message content as a previous outbound SMS in this conversation — always vary your phrasing, add new information, or acknowledge the lack of response so the lead does not feel spammed
 
 STAGES & EXPECTED ACTIONS:
 **CRITICAL LOGIC: If 1+ hours old AND no showing_date → Send SMS follow-up (ignore stage)**
@@ -367,7 +368,11 @@ def _build_user_prompt(lead_context: dict) -> str:
             break
 
     current_date_et = lead_context['current_time'][:10]
-    already_messaged_today = last_outbound_date == current_date_et
+    # Count proactive outbound messages sent today (for 2-per-day limit)
+    outbound_today_count = sum(
+        1 for msg in lead_context.get("recent_messages", [])
+        if msg["direction"] == "outbound" and msg["date"][:10] == current_date_et
+    )
 
     prompt = f"""Analyze this lead and decide the best action:
 
@@ -390,10 +395,10 @@ Hours Since Creation: {hours_since_creation:.1f}h
 Last Stage Change: {lead_context['last_stage_change'][:10]}
 Last Outbound SMS: {last_outbound_date or 'Never'}
 Last Inbound Message: {f"{last_inbound_date}: {last_inbound_body}" if last_inbound_date else 'None'}
-Already Messaged Today: {already_messaged_today}
+Outbound SMS Sent Today: {outbound_today_count}
 Current Date (ET): {current_date_et}
 
-IMPORTANT: If Already Messaged Today = True → action must be "skip" (Rule 3: one message per lead per day max).
+IMPORTANT: If Outbound SMS Sent Today >= 2 → action must be "skip" (Rule 3: max 2 proactive messages per lead per day). Instant replies to inbound messages are exempt from this limit.
 IMPORTANT: If Last Inbound Message exists and is UNANSWERED → respond to it first before any scheduled follow-up.
 
 Recent messages (newest first):

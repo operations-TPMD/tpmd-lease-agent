@@ -2,7 +2,7 @@
 Response Time Engine for Lease Agent
 
 Two modes:
-1. PERIODIC — Runs every 2 hours (9am, 11am, 1pm, 3pm, 5pm, 7pm ET), scans active leads, takes action
+1. PERIODIC — Runs every 3 hours (9am, 12pm, 3pm, 6pm ET), scans active leads, takes action
 2. INSTANT — Webhook endpoint that GHL calls when a lead sends a message/takes action
 
 Setup for instant responses:
@@ -187,9 +187,9 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
 
 
 class PeriodicScheduler:
-    """Runs periodic_scan every 2 hours: 9am, 11am, 1pm, 3pm, 5pm, 7pm Florida ET."""
+    """Runs periodic_scan every 3 hours: 9am, 12pm, 3pm, 6pm Florida ET."""
 
-    RUN_HOURS_ET = [9, 11, 13, 15, 17, 19]  # 9am, 11am, 1pm, 3pm, 5pm, 7pm ET
+    RUN_HOURS_ET = [9, 12, 15, 18]  # 9am, 12pm, 3pm, 6pm ET
 
     def __init__(self, dry_run: bool = True):
         import os
@@ -234,7 +234,7 @@ class PeriodicScheduler:
     def start(self):
         if self._task is None:
             self._task = asyncio.create_task(self._loop())
-            logger.info(f"Scheduler started: every 2 hours (9am, 11am, 1pm, 3pm, 5pm, 7pm ET), dry_run={self.dry_run}")
+            logger.info(f"Scheduler started: every 3 hours (9am, 12pm, 3pm, 6pm ET), dry_run={self.dry_run}")
 
     def stop(self):
         self.running = False
