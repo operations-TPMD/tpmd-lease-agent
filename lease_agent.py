@@ -181,15 +181,37 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
     custom = parse_custom_fields(contact.get("customFields", []))
     now = datetime.now(timezone.utc)
 
-    # Also check GHL appointments for showing date
-    showing_date = custom.get("showing_date", "")
+    # Check GHL calendar appointments for showing date
+    # Always read from calendar (overrides custom field) to catch manually booked showings
+    appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
+    showing_date = ""
+    best_appt = None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for appt in appts.get("events", []):
+        start = appt.get("startTime", "")
+        if not start:
+            continue
+        # Prefer the most recent appointment (upcoming first, then most recent past)
+        if best_appt is None:
+            best_appt = appt
+        else:
+            prev_start = best_appt.get("startTime", "")
+            # If current is upcoming and prev is past, prefer current
+            if start >= now_iso and prev_start < now_iso:
+                best_appt = appt
+            # If both upcoming, prefer earliest
+            elif start >= now_iso and prev_start >= now_iso:
+                if start < prev_start:
+                    best_appt = appt
+            # If both past, prefer most recent
+            elif start < now_iso and prev_start < now_iso:
+                if start > prev_start:
+                    best_appt = appt
+    if best_appt:
+        showing_date = best_appt.get("startTime", "")[:10]
+    # Fallback to custom field if no calendar appointment found
     if not showing_date:
-        appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
-        for appt in appts.get("events", []):
-            appt_date = appt.get("startTime", "")[:10]
-            if appt_date:
-                showing_date = appt_date
-                break
+        showing_date = custom.get("showing_date", "")
 
     return {
         "opportunity_id": opp["id"],
