@@ -182,12 +182,15 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
     now = datetime.now(timezone.utc)
 
     # Check GHL calendar appointments for showing date
-    # Always read from calendar (overrides custom field) to catch manually booked showings
+    # Only look at "Schedule your Self-Showing now" calendar
+    SHOWING_CALENDAR_ID = "I27t4Z2T7ZG0SQlI3Syd"
     appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
     showing_date = ""
     best_appt = None
     now_iso = datetime.now(timezone.utc).isoformat()
     for appt in appts.get("events", []):
+        if appt.get("calendarId") != SHOWING_CALENDAR_ID:
+            continue
         start = appt.get("startTime", "")
         if not start:
             continue
