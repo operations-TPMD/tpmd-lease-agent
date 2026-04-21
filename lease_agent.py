@@ -533,11 +533,24 @@ async def create_appointment(client: httpx.AsyncClient, contact_id: str, date_st
 
 async def send_sms(client: httpx.AsyncClient, contact_id: str, message: str) -> dict:
     """Send an SMS message through GHL."""
-    return await ghl_post(client, "/conversations/messages", {
-        "type": "SMS",
-        "contactId": contact_id,
-        "message": message,
-    })
+    import logging
+    _sms_log = logging.getLogger("send_sms")
+    try:
+        resp = await client.post(
+            f"{GHL_API_BASE}/conversations/messages",
+            headers=ghl_headers(),
+            json={"type": "SMS", "contactId": contact_id, "message": message},
+        )
+        if resp.status_code not in (200, 201):
+            _sms_log.error(
+                f"SMS failed for contact {contact_id} | status={resp.status_code} | "
+                f"message_preview={message[:80]!r} | ghl_response={resp.text[:300]}"
+            )
+            resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        _sms_log.error(f"SMS exception for contact {contact_id}: {e}")
+        raise
 
 
 async def update_stage(client: httpx.AsyncClient, opportunity_id: str, new_stage_name: str) -> dict:

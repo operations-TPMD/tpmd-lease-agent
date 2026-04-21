@@ -29,7 +29,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 sys.path.insert(0, os.path.dirname(__file__))
 from lease_agent import (
     get_all_opportunities, enrich_lead, ask_claude,
-    send_sms, update_stage, add_contact_tag, STAGE_MAP, STAGE_NAME_TO_ID,
+    send_sms, update_stage, add_contact_tag,
+    get_unavailable_properties, _is_property_unavailable,
+    STAGE_MAP, STAGE_NAME_TO_ID,
     LEASE_PIPELINE_ID, GHL_API_KEY, GHL_LOCATION_ID, OPENAI_API_KEY,
     ghl_headers, GHL_API_BASE,
 )
@@ -520,6 +522,38 @@ async def _ghl_set_bot_rules(client: httpx.AsyncClient, rules: str) -> bool:
         return False
 
 
+@app.get("/api/unavailable-properties/preview")
+async def api_preview_unavailable():
+    """Dry-run: show which active leads would be affected by the current unavailable list."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        unavailable = await get_unavailable_properties(client)
+        if not unavailable:
+            return JSONResponse({"affected": [], "unavailable_list": []})
+
+        opps = await get_all_opportunities(client)
+        affected = []
+        for opp in opps:
+            stage_id = opp.get("pipelineStageId", "")
+            stage_name = STAGE_MAP.get(stage_id, "")
+            if stage_name in ("Leased / Won", "Lost") or opp.get("status") == "lost":
+                continue
+            contact = opp.get("contact", {})
+            # Get property address from custom fields without full enrich
+            prop_addr = ""
+            for cf in opp.get("customFields", []):
+                if cf.get("id") == "Vk9hcLmQAaoeLYYPbUUe":
+                    prop_addr = cf.get("value", "")
+                    break
+            if _is_property_unavailable(prop_addr, unavailable):
+                affected.append({
+                    "name": contact.get("name", opp.get("contactId", "?")),
+                    "property": prop_addr,
+                    "stage": stage_name,
+                    "opp_id": opp["id"],
+                })
+        return JSONResponse({"affected": affected, "unavailable_list": unavailable})
+
+
 @app.get("/api/unavailable-properties")
 async def api_get_unavailable_properties():
     async with httpx.AsyncClient(timeout=10) as client:
@@ -875,8 +909,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <p style="font-size:12px;color:#7B6FA0;margin-bottom:8px">One address per line. Leads with these properties will receive a "no longer available" message and be moved to Lost.</p>
       <textarea id="unavailableText" style="width:100%;height:200px;border:1px solid #FECACA;border-radius:8px;padding:12px;font-size:13px;font-family:monospace;resize:vertical;color:#1A1035;outline:none;line-height:1.6" placeholder="10202 Valle Dr Tampa FL 33612&#10;1074 Bridlewood Way Brandon FL 33510"></textarea>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
-        <span id="unavailableSaveStatus" style="font-size:12px;color:#10B981"></span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button onclick="previewUnavailable()" style="background:#FEF3C7;color:#92400E;border:1px solid #FCD34D;padding:8px 16px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">🔍 Preview Affected Leads</button>
+          <span id="unavailableSaveStatus" style="font-size:12px;color:#10B981"></span>
+        </div>
         <button id="saveUnavailableBtn" onclick="saveUnavailableProperties()" style="background:linear-gradient(135deg,#DC2626,#F97316);color:white;border:none;padding:8px 22px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">Save</button>
+      </div>
+      <div id="unavailablePreview" style="display:none;margin-top:14px;border:1px solid #FECACA;border-radius:8px;padding:12px;background:#FFF5F5">
+        <div style="font-size:12px;font-weight:600;color:#DC2626;margin-bottom:8px">⚠️ These leads will be notified + moved to Lost:</div>
+        <div id="unavailablePreviewList" style="font-size:12px;color:#7F1D1D;line-height:1.8"></div>
       </div>
     </div>
   </div>
@@ -1272,6 +1313,22 @@ async function loadUnavailableProperties() {
   const res = await fetch('/api/unavailable-properties');
   const data = await res.json();
   document.getElementById('unavailableText').value = data.properties || '';
+}
+
+async function previewUnavailable() {
+  const previewEl = document.getElementById('unavailablePreview');
+  const listEl = document.getElementById('unavailablePreviewList');
+  listEl.textContent = 'Loading…';
+  previewEl.style.display = 'block';
+  const res = await fetch('/api/unavailable-properties/preview');
+  const data = await res.json();
+  if (!data.affected || data.affected.length === 0) {
+    listEl.innerHTML = '<span style="color:#065F46">✅ No active leads would be affected.</span>';
+    return;
+  }
+  listEl.innerHTML = data.affected.map(a =>
+    `• <strong>${a.name}</strong> — ${a.property || 'no address'} <span style="color:#9CA3AF">(${a.stage})</span>`
+  ).join('<br>');
 }
 
 async function saveUnavailableProperties() {
