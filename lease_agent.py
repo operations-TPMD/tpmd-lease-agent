@@ -166,7 +166,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
 
     messages = []
     for conv in convos.get("conversations", []):
-        msg_data = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 15})
+        msg_data = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 10})
         for m in msg_data.get("messages", {}).get("messages", []):
             if m.get("messageType") in ("TYPE_SMS", "TYPE_EMAIL"):
                 messages.append({
@@ -212,7 +212,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "property_summary": custom.get("property_summary", ""),
         "property_full_listing": custom.get("property_full_listing", ""),
         "property_headline": custom.get("property_headline", ""),
-        "recent_messages": messages[:10],
+        "recent_messages": messages[:6],
         "current_time": now.isoformat(),
         "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
         "reschedule_url": _build_reschedule_url(contact, custom.get("property_address", "")),
@@ -221,173 +221,124 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
 
 # ── Step 3: Ask Claude what to do ────────────────────────────────────────────
 
-def _load_custom_rules() -> str:
-    """Load user-defined custom rules from bot_rules.txt (if it exists)."""
-    import os
-    rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_rules.txt")
-    if os.path.exists(rules_path):
-        with open(rules_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-        if content:
-            return f"\nCUSTOM RULES (defined by property manager — highest priority):\n{content}\n"
+def _load_custom_rules(ghl_client=None) -> str:
+    """Load custom rules from GHL Custom Values (persistent), fallback to local file."""
+    content = ""
+
+    # Try GHL Custom Values first (survives Railway redeploys)
+    if ghl_client is None:
+        # Sync fallback: try local file only
+        rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_rules.txt")
+        if os.path.exists(rules_path):
+            with open(rules_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+    else:
+        # Caller provides async client — they must call async version instead
+        pass
+
+    if content:
+        return f"\nCUSTOM RULES (defined by property manager — highest priority):\n{content}\n"
     return ""
 
 
-SYSTEM_PROMPT_BASE = """You are a lead management assistant for The Property Management Doctor, a property management company in Florida.
+async def _load_custom_rules_async(client) -> str:
+    """Async version: reads bot rules from GHL Custom Values."""
+    try:
+        resp = await client.get(
+            f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+            headers=ghl_headers(),
+        )
+        if resp.status_code == 200:
+            for cv in resp.json().get("customValues", []):
+                if cv.get("name") == "bot_rules":
+                    content = cv.get("value", "").strip()
+                    if content:
+                        return f"\nCUSTOM RULES (defined by property manager — highest priority):\n{content}\n"
+    except Exception:
+        pass
+    return _load_custom_rules()  # fallback to file
 
-You analyze lease leads and decide the SINGLE best action to take RIGHT NOW.
+
+async def get_unavailable_properties(client) -> list[str]:
+    """Return list of unavailable property addresses from GHL Custom Values."""
+    try:
+        resp = await client.get(
+            f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+            headers=ghl_headers(),
+        )
+        if resp.status_code == 200:
+            for cv in resp.json().get("customValues", []):
+                if cv.get("name") == "unavailable_properties":
+                    raw = cv.get("value", "").strip()
+                    if raw:
+                        return [line.strip().lower() for line in raw.splitlines() if line.strip()]
+    except Exception:
+        pass
+    return []
+
+
+def _is_property_unavailable(property_address: str, unavailable_list: list[str]) -> bool:
+    """Check if a property address matches any entry in the unavailable list."""
+    if not property_address or not unavailable_list:
+        return False
+    addr_lower = property_address.lower().strip()
+    return any(addr_lower in ua or ua in addr_lower for ua in unavailable_list)
+
+
+SYSTEM_PROMPT_BASE = """You are a lead management assistant for The Property Management Doctor (Florida). Decide the SINGLE best action for each lead RIGHT NOW.
 
 RULES:
-1. Never send a message if the lead has DND (do not disturb) enabled
-2. Never send promotional messages to leads who were rejected for a specific reason (e.g., pet policy) — instead mark them Lost
-3. Maximum 2 proactive outbound SMS per lead per calendar day (ET). This limit does NOT apply to instant responses triggered by an inbound message from the lead — those are always allowed regardless of daily count.
-4. If the lead hasn't responded to 3+ consecutive outbound SMS messages, wait at least 2 days before the next SMS
-5. Always be contextual — reference the specific property, their situation, their name
-6. Keep SMS messages under 160 characters when possible, max 300 characters per message
-7. Sign messages as "Sivan" or "The Property Management Doctor team"
-8. Use a warm, professional, but casual tone
-9. Never send two messages that are structurally similar back-to-back. If the last 2+ outbound messages are nearly identical in structure, skip — do not send another version of the same message.
-10. If the lead asked a question (rent, pets, fees, utilities, availability, location, etc.), ALWAYS answer it directly using the PROPERTY DETAILS provided — never ignore a question or redirect without answering it first.
-11. NEVER mention "ID", "identity", "ID verification", or "upload your ID" in any message. The scheduling link handles everything internally — just tell the lead to click it to schedule their showing.
-12. When responding to a direct question from the lead, use TWO messages: "message" answers their question, "follow_up_message" is the scheduling CTA. For proactive outbound (no question asked), only use "message".
-13. NEVER ask "how was the showing?" if Days Since Showing = N/A or Days Until Showing is a number — the showing has NOT happened yet. Only ask after the showing has passed.
-14. If the lead just responded (Last Inbound Message is from TODAY), do NOT send a proactive follow-up in the same session. Give them space — respond only if they asked something.
-15. Read the ENTIRE conversation before acting. If the lead said "I rescheduled", "I already uploaded", "I confirmed", "I never went" — honor that. Do not contradict what they said.
-16. If a human team member already answered a question or handled the lead in the last message, do NOT send a duplicate answer or unnecessary follow-up immediately after.
-17. After a lead responds to a message, wait at least 24 hours before the next proactive outbound message — never send a follow-up within the same day they already replied.
-18. Maximum 3 post-showing follow-up attempts total (across all days). If the lead has not responded after 3 attempts, stop messaging them about the showing — do not keep asking the same question indefinitely.
+1. DND enabled → always skip
+2. Max 2 proactive outbound SMS/day (ET). Instant replies to inbound are exempt.
+3. 3+ unanswered outbound in a row → wait 2 days before next SMS
+4. SMS max 160 chars (hard limit 300). Sign as "Sivan" or "The PMD team".
+5. Never send structurally identical messages back-to-back — skip instead.
+6. Answer lead questions directly from PROPERTY DETAILS before any CTA.
+7. NEVER say "ID", "identity verification", or "upload ID". Use the schedule link only.
+8. Direct question from lead → TWO messages: answer in "message", CTA in "follow_up_message". Proactive → one message only.
+9. Days Since Showing = N/A → showing hasn't happened. NEVER ask "how was the showing?" yet.
+10. Lead responded today → no proactive follow-up. Respond only if they asked something.
+11. Honor what the lead said (rescheduled, confirmed, never went). Don't contradict them.
+12. Human team member already replied last → don't duplicate.
+13. Max 3 post-showing follow-up attempts. After 3 with no reply → skip forever.
 
 {custom_rules}
-STAGES & EXPECTED ACTIONS:
-**CRITICAL LOGIC: If 1+ hours old AND no showing_date → Send SMS follow-up (ignore stage)**
 
-- Inquiry (NEW LEAD):
-  * < 1 hour: Send initial SMS with property details
-  * 1+ hours, no showing: Send follow-up SMS to book showing
+STAGE ACTIONS:
+- New Lead / Verification Auto-Sent / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing
+- Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip.
+- After Showing (Days Since Showing >= 0):
+  * 0 attempts: "How was the showing?" warm, no application link yet
+  * 1 attempt, no reply, 2+ days: different check-in
+  * 2 attempts, no reply: final nudge + application link, move to Application Sent
+  * 3+ attempts no reply: skip
+  * Positive reply → application link, move to "Application Sent"
+  * Negative reply → ask what issue, move to "Tenant Feedback"
+  * Said never went / rescheduled → help reschedule, don't ask about showing
+- Tenant Feedback: address specific concern from PROPERTY DETAILS. If resolved → app link. If done → Lost.
+- Application Sent: Day 3 check-in, Day 5-6 reminder with link, Day 7+ final then stop.
 
-- Verification Auto-Sent (waiting for ID):
-  * 1+ hours, no showing: Send SMS to book showing while waiting for ID
-  * If no ID after 24h: Send reminder
+STAGE MOVEMENT — always use send_sms_and_update_stage when moving:
+- Lead confirms showing date/time → "Showing Scheduled" + set appointment_date/time
+- Lead positive after showing → "Application Sent"
+- Lead explicitly not interested → "Lost"
+- Lead had concerns after showing → "Tenant Feedback"
 
-- Call: No Answer:
-  * 1+ hours, no showing: Send follow-up SMS
+LINKS:
+- Schedule Showing: use "Schedule Showing Link" field
+- Reschedule: use "Reschedule Link" field
+- Application: {{ contact.application_link }}
 
-- Call: Answered:
-  * 1+ hours, no showing: Send SMS to book showing
-
-- ID Rejected:
-  * 1+ hours, no showing: TRIGGER VOICE BOT (book showing anyway if eligible)
-  * Explain issue, ask to re-upload or disqualify
-- Showing Scheduled (showing_date EXISTS and NOT passed yet):
-  * If showing is TODAY or TOMORROW: Send a friendly reminder with the address and any access details (lock code if available). Example: "Hi [name], just a reminder — your showing is [today/tomorrow] at [address]! 🏠 Let us know if you need anything."
-  * If showing is 2+ days away: Skip — do not message yet
-  * If lead messages asking to reschedule: Send Reschedule Link immediately
-
-- After Showing (showing_date PASSED — Days Since Showing >= 0):
-  CRITICAL: Only use this section when Days Since Showing is a real number (not N/A). Never ask "how was the showing" before the showing date.
-
-  Count how many post-showing outbound messages already exist in the conversation history.
-  * If 0 post-showing outbound messages: Send first "How was the showing?" — warm, casual, not salesy. Do NOT include application link yet.
-  * If 1 post-showing outbound message, no inbound response yet, 2+ days later: Send ONE more check-in — different wording, e.g. mention something specific about the property.
-  * If 2 post-showing outbound messages, still no response: Send ONE final message with application link — "We'd love to have you. If you're interested: [Application URL]"
-  * If 3+ post-showing outbound messages with NO response: STOP. Do not message again. Skip.
-  * If they respond POSITIVELY ("loved it", "interested", "yes", "I'd like to apply"): Send application link immediately (use the Application URL field), move to "Application Sent"
-  * If they respond NEGATIVELY ("didn't like it", "not interested", "too small"): Ask what the issue was specifically, move to "Tenant Feedback"
-  * If they respond AMBIGUOUSLY ("it was okay", "maybe", "thinking about it"): Acknowledge their specific concern, add one relevant detail from PROPERTY DETAILS, ask what would help them decide — do NOT send application link yet
-  * If they say they NEVER WENT or RESCHEDULED: Do not ask about the showing. Treat as showing still pending — help them reschedule.
-
-- Tenant Feedback (lead visited but wasn't sure / had concerns):
-  * If they mentioned a specific issue (noise, size, price, pets): Address it directly using property details
-  * If pets were the issue and pets ARE allowed: Clarify pet policy from PROPERTY DETAILS
-  * If it's a price concern: Mention what's included (utilities, parking, etc.)
-  * If genuinely not interested: Acknowledge warmly, move to Lost
-  * If positive after addressing concern: Send application link
-
-- Application Sent:
-  * Day 3: "Hi [name], just checking — did you get a chance to start the application? Happy to help if you have questions 😊"
-  * Day 5-6: "Hi [name], quick reminder — your application is still waiting! The unit is in high demand. [application link]"
-  * Day 7+: One final reminder, then stop following up on application
-
-- Leased / Won:
-  * No action needed
-
-- Lost:
-  * No action needed
-
-HANDLING CUSTOMER REQUESTS & FEEDBACK:
-
-**Post-Showing Feedback:**
-- POSITIVE response ("I loved it!", "Yes I'm interested"):
-  * Send application link immediately
-  * Move to "Application Sent" stage
-  * Record their positive feedback in notes
-- NEGATIVE response ("Not for me", "Didn't like it", "Has issues"):
-  * Ask specifically: "What was the issue? (pets, noise, layout, other?)"
-  * Move to "Tenant Feedback" stage
-  * **Record their feedback** in notes so we know if there's a property problem
-  * Suggest alternatives if possible
-
-**Reschedule Requests:**
-- If "Can't make it Thursday": Offer new time OR send reschedule link
-- Message: "No problem! Here's a link to pick a new time: [Reschedule Link]"
-- Update showing_date once confirmed
-
-**Cancellations:**
-- NOT automatic Lost stage
-- Respond: "We understand. We'd love to find a date that works better for you. How about {{alternative_date}}?"
-- Only move to Lost if they explicitly say "Not interested at all" or refuse multiple reschedule offers
-
-**Application Sending:**
-- DO NOT wait for customer to ask
-- When customer expresses interest after showing: Auto-send application link
-- Message: "Great! Here's your application: [send the appropriate trigger link]"
-- Background check handling: Ignore anything before 2019 (unless criminal). For post-2019: "We'll verify with the property owner"
-
-**Scheduling / Booking Link:**
-- Use the "Schedule Showing Link" from the lead data (pre-filled short URL)
-- NEVER say "upload ID" or mention ID at all. Always frame it as scheduling a showing.
-- Example: "Hi [name], ready to see it? Click here to schedule your showing: [Schedule Showing Link]"
-
-**Property Questions:**
-- Answer from: PROPERTY DETAILS block in the lead data (rent, utilities, pets, fees, etc.)
-- If asked about background/history: Follow background check policy above
-
-**Links to use in SMS:**
-- Schedule Showing: use the "Schedule Showing Link" field (already pre-filled, short URL)
-- Reschedule Tour: use the "Reschedule Link" field (already pre-filled, short URL)
-- Send Code/Access: {{trigger_link.5IDHUuj9VVY8x02kY2j}}
-
-**Application Link:**
-- When sending the application link, always use: {{ contact.application_link }}
-- Example: "Here's your application link: {{ contact.application_link }}"
-
-RESPOND WITH EXACTLY THIS JSON FORMAT:
+RESPOND WITH EXACTLY THIS JSON:
 {
-  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "skip",
-  "message": "First SMS — direct answer to their question, or proactive outbound message",
-  "follow_up_message": "Second SMS — scheduling CTA (ONLY include this when responding to a direct question from the lead, leave empty string otherwise)",
-  "new_stage": "Stage Name (only if updating stage)",
-  "reasoning": "Brief explanation of why this action"
-}
-
-DECISION TREE (APPLY THIS FIRST):
-1. If showing_date is EMPTY AND hours_since_creation < 1 → Send initial SMS with property details
-2. If showing_date is EMPTY AND hours_since_creation >= 1 → Send follow-up SMS to book showing
-3. If showing_date EXISTS AND date is TODAY or TOMORROW → Send showing reminder with address + lock code if available
-4. If showing_date EXISTS AND date is 2+ days away → Skip (no message needed yet)
-5. If showing_date EXISTS AND date HAS passed:
-   a. 0-1 days after → Ask "How was the showing?" (warm, casual)
-   b. 2-3 days after, no response → Second check-in
-   c. 4+ days after, no response → Final nudge with application link
-   d. Lead responded positively → Send application link, move to Application Sent
-   e. Lead responded negatively → Ask what the issue was, move to Tenant Feedback
-6. If stage is Application Sent → Follow up on application status based on days elapsed since last message
-
-ACTION GUIDE:
-- "send_sms": Send an SMS message to the customer
-- "update_stage": Move the opportunity to a new stage
-- "send_sms_and_update_stage": Do both — send SMS and update stage
-- "skip": No action needed right now"""
+  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "skip",
+  "message": "SMS text",
+  "follow_up_message": "second SMS or empty string",
+  "new_stage": "Stage Name or empty string",
+  "appointment_date": "YYYY-MM-DD or empty string",
+  "appointment_time": "HH:MM or empty string",
+  "reasoning": "one sentence"
+}"""
 
 
 def _build_user_prompt(lead_context: dict) -> str:
@@ -450,8 +401,16 @@ def _build_user_prompt(lead_context: dict) -> str:
     # Check if last inbound was today (lead already responded today)
     last_inbound_today = last_inbound_date == current_date_et if last_inbound_date else False
 
-    # Build property details block for GPT context
-    property_info = lead_context.get("property_full_listing") or lead_context.get("property_summary") or ""
+    # Only include full listing if lead asked a property question — saves tokens
+    QUESTION_KEYWORDS = ("rent", "price", "cost", "pet", "dog", "cat", "fee", "util", "park",
+                         "avail", "bedroom", "bath", "sqft", "size", "where", "located", "how much",
+                         "laundry", "garage", "deposit", "include", "allow", "accept")
+    inbound_lower = last_inbound_body.lower()
+    has_question = any(kw in inbound_lower for kw in QUESTION_KEYWORDS)
+    if has_question:
+        property_info = lead_context.get("property_full_listing") or lead_context.get("property_summary") or ""
+    else:
+        property_info = lead_context.get("property_summary") or ""
 
     prompt = f"""Analyze this lead and decide the best action:
 
@@ -514,7 +473,8 @@ def _parse_ai_response(text: str) -> dict:
 async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
     """Send lead context to GPT-4o-mini and get action recommendation."""
     user_prompt = _build_user_prompt(lead_context)
-    system_prompt = SYSTEM_PROMPT_BASE.replace("{custom_rules}", _load_custom_rules())
+    custom_rules = await _load_custom_rules_async(client)
+    system_prompt = SYSTEM_PROMPT_BASE.replace("{custom_rules}", custom_rules)
 
     # Use OpenAI (GPT-4o-mini)
     resp = await client.post(
@@ -541,6 +501,35 @@ async def ask_claude(client: httpx.AsyncClient, lead_context: dict) -> dict:
 
 
 # ── Step 4: Execute actions ──────────────────────────────────────────────────
+
+async def create_appointment(client: httpx.AsyncClient, contact_id: str, date_str: str, time_str: str) -> dict:
+    """Create a GHL appointment (calendar event) for a showing."""
+    try:
+        # Combine date + time into ISO format (assume ET timezone)
+        from datetime import datetime as dt_cls
+        import zoneinfo
+        ET = zoneinfo.ZoneInfo("America/New_York")
+        naive = dt_cls.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        start_dt = naive.replace(tzinfo=ET)
+        end_dt = start_dt.replace(hour=start_dt.hour + 1)  # 1-hour slot
+
+        resp = await client.post(
+            f"{GHL_API_BASE}/calendars/events",
+            headers=ghl_headers(),
+            json={
+                "locationId": GHL_LOCATION_ID,
+                "contactId": contact_id,
+                "title": "Property Showing",
+                "startTime": start_dt.isoformat(),
+                "endTime": end_dt.isoformat(),
+                "status": "confirmed",
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
 
 async def send_sms(client: httpx.AsyncClient, contact_id: str, message: str) -> dict:
     """Send an SMS message through GHL."""
@@ -605,6 +594,18 @@ async def execute_action(
             await update_stage(client, lead["opportunity_id"], new_stage)
             log_lines.append(f"  🔄 MOVED {name}: {lead['stage']} → {new_stage}")
 
+    if action == "create_appointment":
+        appt_date = decision.get("appointment_date", "")
+        appt_time = decision.get("appointment_time", "09:00")
+        if dry_run:
+            log_lines.append(f"  📅 [DRY RUN] Would create appointment for {name} on {appt_date} {appt_time}")
+        elif appt_date:
+            result = await create_appointment(client, lead["contact_id"], appt_date, appt_time)
+            if "error" in result:
+                log_lines.append(f"  ❌ Appointment failed for {name}: {result['error']}")
+            else:
+                log_lines.append(f"  📅 APPOINTMENT created for {name}: {appt_date} {appt_time}")
+
     if action == "trigger_voice_bot":
         if dry_run:
             log_lines.append(f"  📞 [DRY RUN] Would trigger voice bot for {name}")
@@ -620,21 +621,41 @@ async def execute_action(
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool) -> str:
+async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unavailable_properties: list[str] = None) -> str:
     """Process a single lead: enrich → decide → act."""
+    # Early exit before enriching (saves API calls)
+    stage_id = opp.get("pipelineStageId", "")
+    stage_name = STAGE_MAP.get(stage_id, "")
+    if stage_name in ("Leased / Won", "Lost") or opp.get("status") == "lost":
+        name = opp.get("contact", {}).get("name", opp.get("contactId", "?"))
+        return f"  ⏭ SKIP {name} (terminal stage)"
+
     try:
         lead = await enrich_lead(client, opp)
     except Exception as e:
         name = opp.get("contact", {}).get("name", opp.get("contactId", "?"))
         return f"  ❌ ERROR enriching {name}: {e}"
 
-    # Skip leads that are already won/lost or have DND
-    if lead["opp_status"] == "lost":
-        return f"  ⏭ SKIP {lead['name']} (status=lost)"
-    if lead["stage"] in ("Leased / Won", "Lost"):
-        return f"  ⏭ SKIP {lead['name']} (stage={lead['stage']})"
     if lead["dnd"]:
         return f"  ⏭ SKIP {lead['name']} (DND enabled)"
+
+    # Check if property is unavailable
+    if unavailable_properties is None:
+        unavailable_properties = await get_unavailable_properties(client)
+
+    if _is_property_unavailable(lead.get("property_address", ""), unavailable_properties):
+        name = lead["name"]
+        addr = lead.get("property_address", "")
+        if dry_run:
+            return f"  🚫 [DRY RUN] {name}: property unavailable ({addr}) → would send notice + move to Lost"
+        # Send one final message and move to Lost
+        msg = f"Hi {lead['name'].split()[0]}! Unfortunately this unit is no longer available. We'll reach out if something similar comes up. Thanks!"
+        try:
+            await send_sms(client, lead["contact_id"], msg)
+            await update_stage(client, lead["opportunity_id"], "Lost")
+        except Exception as e:
+            return f"  ❌ ERROR closing unavailable lead {name}: {e}"
+        return f"  🚫 {name}: property unavailable → notified + moved to Lost"
 
     try:
         decision = await ask_claude(client, lead)
@@ -670,10 +691,15 @@ async def main():
     print(f"{'='*60}\n")
 
     async with httpx.AsyncClient(timeout=30) as client:
+        # Load unavailable properties once (shared across all leads)
+        unavailable = await get_unavailable_properties(client)
+        if unavailable:
+            print(f"Unavailable properties: {len(unavailable)} entries\n")
+
         if args.lead:
             # Process single lead
             opp = await ghl_get(client, f"/opportunities/{args.lead}")
-            result = await process_lead(client, opp, dry_run)
+            result = await process_lead(client, opp, dry_run, unavailable)
             print(result)
             return
 
@@ -690,7 +716,7 @@ async def main():
         errors = 0
 
         for opp in opps:
-            result = await process_lead(client, opp, dry_run)
+            result = await process_lead(client, opp, dry_run, unavailable)
             print(result)
             if "SKIP" in result:
                 skipped += 1

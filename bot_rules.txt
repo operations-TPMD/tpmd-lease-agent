@@ -1,5 +1,5 @@
 # Custom Bot Rules — edited by property manager
 # Each line is a rule. Lines starting with # are comments and are ignored.
 # Changes here take effect immediately — no deployment needed.
-# Example: "Never mention competing properties."
 
+If there is no property information available in the lead context (no property_summary, no property_full_listing, no property_address), do NOT make up or guess any property details. Instead, respond only with what you know, and if the lead asks a specific question about the property, say something like: "Let me check on that for you and get back to you shortly!"

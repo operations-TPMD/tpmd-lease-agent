@@ -456,25 +456,136 @@ async def api_webhook_log():
 
 
 BOT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_rules.txt")
+# GHL Custom Value key used to persist bot rules across deploys
+BOT_RULES_GHL_KEY = "bot_rules"
+
+async def _ghl_get_bot_rules(client: httpx.AsyncClient) -> str:
+    """Read bot rules from GHL Custom Values (persists across Railway deploys)."""
+    try:
+        resp = await client.get(
+            f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+            headers=ghl_headers(),
+        )
+        if resp.status_code == 200:
+            for cv in resp.json().get("customValues", []):
+                if cv.get("name") == BOT_RULES_GHL_KEY:
+                    return cv.get("value", "")
+    except Exception as e:
+        logger.warning(f"Could not read bot rules from GHL: {e}")
+    # Fallback to local file
+    try:
+        with open(BOT_RULES_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+async def _ghl_set_bot_rules(client: httpx.AsyncClient, rules: str) -> bool:
+    """Upsert bot rules in GHL Custom Values."""
+    try:
+        # Get existing custom values to find the ID (if exists)
+        resp = await client.get(
+            f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+            headers=ghl_headers(),
+        )
+        cv_id = None
+        if resp.status_code == 200:
+            for cv in resp.json().get("customValues", []):
+                if cv.get("name") == BOT_RULES_GHL_KEY:
+                    cv_id = cv.get("id")
+                    break
+
+        if cv_id:
+            r = await client.put(
+                f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues/{cv_id}",
+                headers=ghl_headers(),
+                json={"name": BOT_RULES_GHL_KEY, "value": rules},
+            )
+        else:
+            r = await client.post(
+                f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+                headers=ghl_headers(),
+                json={"name": BOT_RULES_GHL_KEY, "value": rules},
+            )
+        return r.status_code in (200, 201)
+    except Exception as e:
+        logger.warning(f"Could not save bot rules to GHL: {e}")
+
+    # Fallback: save to local file
+    try:
+        with open(BOT_RULES_PATH, "w", encoding="utf-8") as f:
+            f.write(rules)
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/unavailable-properties")
+async def api_get_unavailable_properties():
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.get(
+                f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+                headers=ghl_headers(),
+            )
+            if resp.status_code == 200:
+                for cv in resp.json().get("customValues", []):
+                    if cv.get("name") == "unavailable_properties":
+                        return JSONResponse({"properties": cv.get("value", "")})
+        except Exception as e:
+            logger.warning(f"Could not read unavailable_properties from GHL: {e}")
+    return JSONResponse({"properties": ""})
+
+
+@app.post("/api/unavailable-properties")
+async def api_set_unavailable_properties(request: Request):
+    try:
+        body = await request.json()
+        properties = body.get("properties", "")
+        count = len([l for l in properties.splitlines() if l.strip()])
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Find existing custom value ID
+            resp = await client.get(
+                f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+                headers=ghl_headers(),
+            )
+            cv_id = None
+            if resp.status_code == 200:
+                for cv in resp.json().get("customValues", []):
+                    if cv.get("name") == "unavailable_properties":
+                        cv_id = cv.get("id")
+                        break
+            if cv_id:
+                await client.put(
+                    f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues/{cv_id}",
+                    headers=ghl_headers(),
+                    json={"name": "unavailable_properties", "value": properties},
+                )
+            else:
+                await client.post(
+                    f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+                    headers=ghl_headers(),
+                    json={"name": "unavailable_properties", "value": properties},
+                )
+        return JSONResponse({"status": "saved", "count": count})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 @app.get("/api/bot-rules")
 async def api_get_bot_rules():
-    """Return current custom bot rules."""
-    try:
-        with open(BOT_RULES_PATH, "r", encoding="utf-8") as f:
-            return JSONResponse({"rules": f.read()})
-    except FileNotFoundError:
-        return JSONResponse({"rules": ""})
+    async with httpx.AsyncClient(timeout=10) as client:
+        rules = await _ghl_get_bot_rules(client)
+    return JSONResponse({"rules": rules})
 
 @app.post("/api/bot-rules")
 async def api_set_bot_rules(request: Request):
-    """Save custom bot rules to file (takes effect immediately)."""
     try:
         body = await request.json()
         rules = body.get("rules", "")
-        with open(BOT_RULES_PATH, "w", encoding="utf-8") as f:
-            f.write(rules)
-        logger.info(f"Bot rules updated: {len(rules)} chars")
+        async with httpx.AsyncClient(timeout=10) as client:
+            ok = await _ghl_set_bot_rules(client, rules)
+        logger.info(f"Bot rules updated: {len(rules)} chars, ghl_saved={ok}")
         return JSONResponse({"status": "saved", "chars": len(rules)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -482,21 +593,21 @@ async def api_set_bot_rules(request: Request):
 
 @app.post("/api/bot-feedback")
 async def api_bot_feedback(request: Request):
-    """Append message feedback as a rule to bot_rules.txt."""
+    """Append message feedback as a rule (persisted to GHL)."""
     try:
         body = await request.json()
         inbound = body.get("inbound", "")
         bot_msg = body.get("bot_message", "")
         feedback = body.get("feedback", "")
-        rating = body.get("rating", "bad")  # "good" or "bad"
+        rating = body.get("rating", "bad")
 
         if rating == "bad" and feedback:
-            # Convert feedback into a concrete rule and append to file
             from datetime import datetime as dt
             timestamp = dt.now().strftime("%Y-%m-%d %H:%M")
             rule_line = f"\n# Feedback [{timestamp}] — Lead said: \"{inbound[:80]}\" → Bot replied: \"{bot_msg[:80]}\"\n# Issue: {feedback}\n{feedback}\n"
-            with open(BOT_RULES_PATH, "a", encoding="utf-8") as f:
-                f.write(rule_line)
+            async with httpx.AsyncClient(timeout=10) as client:
+                existing = await _ghl_get_bot_rules(client)
+                await _ghl_set_bot_rules(client, existing + rule_line)
             logger.info(f"Feedback rule appended: {feedback[:80]}")
             return JSONResponse({"status": "saved"})
         return JSONResponse({"status": "skipped"})
@@ -710,6 +821,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="header-right">
     <span class="scan-time" id="scanTime"></span>
     <button class="btn btn-outline" style="color:white;border-color:rgba(255,255,255,0.4)" onclick="openTrainModal()">🎓 Train Bot</button>
+    <button class="btn btn-outline" style="color:#FCA5A5;border-color:rgba(252,165,165,0.5)" onclick="openUnavailableModal()">🚫 Unavailable Units</button>
     <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan All Leads</button>
   </div>
 </div>
@@ -744,6 +856,27 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <p style="font-size:12px;color:#7B6FA0;margin-bottom:14px">Rate recent bot responses. When you click ❌ you can explain what was wrong — it becomes a rule automatically.</p>
       <div id="feedbackList" style="display:flex;flex-direction:column;gap:10px;max-height:420px;overflow-y:auto">
         <div style="color:#B0A8CC;font-size:13px;text-align:center;padding:30px">Loading recent messages…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Unavailable Properties Modal -->
+<div id="unavailableModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow:auto">
+  <div style="background:white;max-width:560px;margin:40px auto;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="background:linear-gradient(135deg,#DC2626,#F97316);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <span style="color:white;font-weight:700;font-size:16px">🚫 Unavailable Units</span>
+        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Bot will stop marketing these + notify leads</span>
+      </div>
+      <button onclick="closeUnavailableModal()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+    </div>
+    <div style="padding:20px">
+      <p style="font-size:12px;color:#7B6FA0;margin-bottom:8px">One address per line. Leads with these properties will receive a "no longer available" message and be moved to Lost.</p>
+      <textarea id="unavailableText" style="width:100%;height:200px;border:1px solid #FECACA;border-radius:8px;padding:12px;font-size:13px;font-family:monospace;resize:vertical;color:#1A1035;outline:none;line-height:1.6" placeholder="10202 Valle Dr Tampa FL 33612&#10;1074 Bridlewood Way Brandon FL 33510"></textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+        <span id="unavailableSaveStatus" style="font-size:12px;color:#10B981"></span>
+        <button id="saveUnavailableBtn" onclick="saveUnavailableProperties()" style="background:linear-gradient(135deg,#DC2626,#F97316);color:white;border:none;padding:8px 22px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">Save</button>
       </div>
     </div>
   </div>
@@ -1119,6 +1252,47 @@ async function saveBotRules() {
   const data = await res.json();
   btn.textContent = data.status === 'saved' ? '✅ Saved!' : '❌ Error';
   setTimeout(() => { btn.textContent = 'Save Rules'; btn.disabled = false; }, 2000);
+}
+
+// ── Unavailable Properties Modal ─────────────────────────────────────────────
+function openUnavailableModal() {
+  document.getElementById('unavailableModal').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+  loadUnavailableProperties();
+}
+function closeUnavailableModal() {
+  document.getElementById('unavailableModal').style.display = 'none';
+  document.body.style.overflow = '';
+}
+document.getElementById('unavailableModal').addEventListener('click', function(e) {
+  if (e.target === this) closeUnavailableModal();
+});
+
+async function loadUnavailableProperties() {
+  const res = await fetch('/api/unavailable-properties');
+  const data = await res.json();
+  document.getElementById('unavailableText').value = data.properties || '';
+}
+
+async function saveUnavailableProperties() {
+  const properties = document.getElementById('unavailableText').value;
+  const btn = document.getElementById('saveUnavailableBtn');
+  const status = document.getElementById('unavailableSaveStatus');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+  const res = await fetch('/api/unavailable-properties', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({properties})
+  });
+  const data = await res.json();
+  if (data.status === 'saved') {
+    status.textContent = `✅ Saved (${data.count} properties)`;
+    btn.textContent = 'Save';
+  } else {
+    status.textContent = '❌ Error saving';
+    btn.textContent = 'Save';
+  }
+  btn.disabled = false;
+  setTimeout(() => { status.textContent = ''; }, 3000);
 }
 
 async function loadFeedbackList() {

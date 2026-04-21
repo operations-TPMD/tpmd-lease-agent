@@ -19,7 +19,9 @@ import httpx
 
 from lease_agent import (
     get_all_opportunities, enrich_lead, ask_claude,
-    send_sms, update_stage, STAGE_MAP, STAGE_NAME_TO_ID,
+    send_sms, update_stage, create_appointment,
+    get_unavailable_properties, _is_property_unavailable,
+    STAGE_MAP, STAGE_NAME_TO_ID,
     GHL_API_KEY, GHL_LOCATION_ID, OPENAI_API_KEY,
     ghl_headers, GHL_API_BASE,
 )
@@ -48,7 +50,8 @@ async def periodic_scan(dry_run: bool = False) -> dict:
 
     async with httpx.AsyncClient(timeout=30) as client:
         opps = await get_all_opportunities(client)
-        logger.info(f"Periodic scan: {len(opps)} opportunities found")
+        unavailable = await get_unavailable_properties(client)
+        logger.info(f"Periodic scan: {len(opps)} opportunities found, {len(unavailable)} unavailable properties")
 
         for opp in opps:
             stage_id = opp.get("pipelineStageId", "")
@@ -65,6 +68,16 @@ async def periodic_scan(dry_run: bool = False) -> dict:
 
                 if lead["dnd"]:
                     summary["skipped"] += 1
+                    continue
+
+                # Check if property is unavailable
+                if _is_property_unavailable(lead.get("property_address", ""), unavailable):
+                    if not dry_run:
+                        msg = f"Hi {lead['name'].split()[0]}! Unfortunately this unit is no longer available. We'll reach out if something similar comes up. Thanks!"
+                        await send_sms(client, lead["contact_id"], msg)
+                        await update_stage(client, opp["id"], "Lost")
+                    summary["actions"] += 1
+                    summary["details"].append({"name": lead["name"], "action": "unavailable_property", "stage": "Lost"})
                     continue
 
                 # Add delay to avoid rate limiting
@@ -95,6 +108,13 @@ async def periodic_scan(dry_run: bool = False) -> dict:
                         if decision.get("new_stage"):
                             await update_stage(client, opp["id"], decision["new_stage"])
                             detail["stage_updated"] = True
+
+                    if action == "create_appointment" or (decision.get("appointment_date") and action == "send_sms_and_update_stage"):
+                        appt_date = decision.get("appointment_date", "")
+                        appt_time = decision.get("appointment_time", "09:00")
+                        if appt_date:
+                            appt_result = await create_appointment(client, lead["contact_id"], appt_date, appt_time)
+                            detail["appointment_created"] = "error" not in appt_result
 
                 summary["actions"] += 1
                 summary["details"].append(detail)
@@ -181,7 +201,6 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                     if decision.get("message"):
                         await send_sms(client, contact_id, decision["message"])
                         result["sms_sent"] = True
-                    # Send follow-up SMS (answer to question) after short delay
                     if follow_up:
                         await asyncio.sleep(random.uniform(3, 6))
                         await send_sms(client, contact_id, follow_up)
@@ -191,6 +210,13 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                     if decision.get("new_stage"):
                         await update_stage(client, opp["id"], decision["new_stage"])
                         result["stage_updated"] = True
+
+                if action == "create_appointment" or (decision.get("appointment_date") and action == "send_sms_and_update_stage"):
+                    appt_date = decision.get("appointment_date", "")
+                    appt_time = decision.get("appointment_time", "09:00")
+                    if appt_date:
+                        appt_result = await create_appointment(client, contact_id, appt_date, appt_time)
+                        result["appointment_created"] = "error" not in appt_result
 
             return result
 
