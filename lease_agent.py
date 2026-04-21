@@ -207,8 +207,13 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
             elif start < now_iso and prev_start < now_iso:
                 if start > prev_start:
                     best_appt = appt
+    showing_time = ""
     if best_appt:
         showing_date = best_appt.get("startTime", "")[:10]
+        # Extract HH:MM from ISO timestamp (e.g. "2026-04-22T14:00:00+00:00")
+        raw_start = best_appt.get("startTime", "")
+        if "T" in raw_start:
+            showing_time = raw_start[11:16]  # "HH:MM"
     # Fallback to custom field if no calendar appointment found
     if not showing_date:
         showing_date = custom.get("showing_date", "")
@@ -231,6 +236,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "id_status": custom.get("id_verification_status", ""),
         "lock_code": custom.get("lock_code", ""),
         "showing_date": showing_date,
+        "showing_time": showing_time,
         "application_url": custom.get("application_url", ""),
         "special_offer": custom.get("special_offer", ""),
         "property_summary": custom.get("property_summary", ""),
@@ -320,7 +326,7 @@ RULES:
 6. Answer lead questions directly from PROPERTY DETAILS before any CTA.
 7. NEVER say "ID", "identity verification", or "upload ID". Use the schedule link only.
 8. Direct question from lead → TWO messages: answer in "message", CTA in "follow_up_message". Proactive → one message only.
-9. Days Since Showing = N/A → showing hasn't happened. NEVER ask "how was the showing?" yet.
+9. Days Since Showing = N/A → showing hasn't happened OR ended less than 1 hour ago. NEVER ask "how was the showing?" until at least 1 hour has passed since the showing time.
 10. Lead responded today → no proactive follow-up. Respond only if they asked something.
 11. Honor what the lead said (rescheduled, confirmed, never went). Don't contradict them.
 12. If the last outbound message was sent by a human (not the bot) within the last 20 minutes → action must be "skip". Do not send anything while a human agent may be actively handling the lead.
@@ -402,22 +408,41 @@ def _build_user_prompt(lead_context: dict) -> str:
         if msg["direction"] == "outbound" and msg["date"][:10] == current_date_et
     )
 
-    # Calculate days since/until showing
+    # Calculate days/hours since/until showing
     showing_date_str = lead_context.get("showing_date", "")
+    showing_time_str = lead_context.get("showing_time", "")  # HH:MM if available
     days_since_showing = None
     days_until_showing = None
+    hours_since_showing = None
     if showing_date_str:
         try:
             from datetime import datetime as dt_class, date as date_class
-            showing = dt_class.strptime(showing_date_str[:10], "%Y-%m-%d").date()
-            today = date_class.fromisoformat(current_date_et)
-            diff = (today - showing).days  # positive = past, negative = future
-            if diff >= 0:
-                days_since_showing = diff
+            import zoneinfo
+            ET = zoneinfo.ZoneInfo("America/New_York")
+            # Build showing datetime (use time if available, else assume end of day)
+            if showing_time_str:
+                showing_dt = dt_class.strptime(f"{showing_date_str[:10]} {showing_time_str[:5]}", "%Y-%m-%d %H:%M").replace(tzinfo=ET)
             else:
-                days_until_showing = abs(diff)
+                # No time known — assume showing ends at 8pm ET
+                showing_dt = dt_class.strptime(f"{showing_date_str[:10]} 20:00", "%Y-%m-%d %H:%M").replace(tzinfo=ET)
+            now_et = dt_class.fromisoformat(lead_context['current_time'].replace('Z', '+00:00')).astimezone(ET)
+            diff_hours = (now_et - showing_dt).total_seconds() / 3600
+            if diff_hours >= 1:  # Only consider showing "done" after 1 hour
+                days_since_showing = int(diff_hours // 24)
+                hours_since_showing = round(diff_hours, 1)
+            elif diff_hours < 0:
+                days_until_showing = int(abs(diff_hours) // 24)
+            # else: showing is within the last hour — treat as still ongoing
         except:
-            pass
+            # Fallback to date-only comparison
+            from datetime import date as date_class
+            showing = date_class.fromisoformat(showing_date_str[:10])
+            today = date_class.fromisoformat(current_date_et)
+            diff = (today - showing).days
+            if diff > 0:
+                days_since_showing = diff
+            elif diff < 0:
+                days_until_showing = abs(diff)
 
     # Count post-showing outbound messages (to enforce 3-message cap)
     post_showing_outbound_count = 0
@@ -464,7 +489,8 @@ ID Verification: {lead_context['id_status'] or 'Not done'}
 Lock Code: {lead_context['lock_code'] if lead_context['lock_code'] else 'Not issued'}
 Showing Date: {lead_context['showing_date'] or 'Not scheduled'}
 Days Until Showing: {days_until_showing if days_until_showing is not None else 'N/A'}
-Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (showing has not happened yet)'}
+Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (showing has not happened yet or ended less than 1 hour ago)'}
+Hours Since Showing: {hours_since_showing if hours_since_showing is not None else 'N/A'}
 Post-Showing Outbound Messages Sent: {post_showing_outbound_count}
 Lead Responded Today: {last_inbound_today}
 Last Human Reply Minutes Ago: {last_human_reply_minutes_ago if last_human_reply_minutes_ago is not None else 'N/A'}
