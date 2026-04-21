@@ -19,7 +19,7 @@ import httpx
 
 from lease_agent import (
     get_all_opportunities, enrich_lead, ask_claude,
-    send_sms, update_stage, create_appointment,
+    send_sms, update_stage, create_appointment, send_team_alert,
     get_unavailable_properties, _is_property_unavailable,
     STAGE_MAP, STAGE_NAME_TO_ID,
     GHL_API_KEY, GHL_LOCATION_ID, OPENAI_API_KEY,
@@ -115,6 +115,13 @@ async def periodic_scan(dry_run: bool = False) -> dict:
                         if appt_date:
                             appt_result = await create_appointment(client, lead["contact_id"], appt_date, appt_time)
                             detail["appointment_created"] = "error" not in appt_result
+
+                    if action == "escalate_to_team":
+                        reason = decision.get("escalation_reason", "Lead needs urgent assistance")
+                        msg = decision.get("message", "I'm sorry for the trouble! Our team will call you shortly.")
+                        await send_sms(client, lead["contact_id"], msg)
+                        await send_team_alert(client, lead, reason)
+                        detail["escalated"] = True
 
                 summary["actions"] += 1
                 summary["details"].append(detail)
@@ -217,6 +224,13 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                     if appt_date:
                         appt_result = await create_appointment(client, contact_id, appt_date, appt_time)
                         result["appointment_created"] = "error" not in appt_result
+
+                if action == "escalate_to_team":
+                    reason = decision.get("escalation_reason", "Lead needs urgent assistance")
+                    msg = decision.get("message", "I'm sorry for the trouble! Our team will call you shortly.")
+                    await send_sms(client, contact_id, msg)
+                    await send_team_alert(client, lead, reason)
+                    result["escalated"] = True
 
             return result
 

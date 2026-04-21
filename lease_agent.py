@@ -32,6 +32,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # fallback if OpenAI unavailable
 
 LEASE_PIPELINE_ID = "DVv60aGSOc7XtIofy4Pn"
+TEAM_ALERT_PHONE = "+19545799165"
 
 # Map stage IDs to names
 STAGE_MAP = {
@@ -303,6 +304,8 @@ RULES:
 12. If the last outbound message was sent by a human (not the bot) within the last 20 minutes → action must be "skip". Do not send anything while a human agent may be actively handling the lead.
 13. If Last Human Reply Minutes Ago < 20 → skip, regardless of any other logic.
 14. Max 3 post-showing follow-up attempts. After 3 with no reply → skip forever.
+15. EMERGENCY — LOCKBOX/ACCESS FAILURE: If the lead says the code or lockbox is not working AND the bot already tried the same code/answer once before in this conversation → action must be "escalate_to_team". Do NOT repeat the same code again. The team will be alerted by SMS.
+16. If the lead reports the same problem 2+ times with no resolution → action must be "escalate_to_team".
 
 {custom_rules}
 
@@ -333,12 +336,13 @@ LINKS:
 
 RESPOND WITH EXACTLY THIS JSON:
 {
-  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "skip",
-  "message": "SMS text",
+  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "escalate_to_team" | "skip",
+  "message": "SMS text to lead (for escalate_to_team: apologetic message to lead saying team will call them shortly)",
   "follow_up_message": "second SMS or empty string",
   "new_stage": "Stage Name or empty string",
   "appointment_date": "YYYY-MM-DD or empty string",
   "appointment_time": "HH:MM or empty string",
+  "escalation_reason": "short description of why escalating (only for escalate_to_team)",
   "reasoning": "one sentence"
 }"""
 
@@ -547,6 +551,40 @@ async def create_appointment(client: httpx.AsyncClient, contact_id: str, date_st
         return {"error": str(e)}
 
 
+async def send_team_alert(client: httpx.AsyncClient, lead: dict, reason: str) -> bool:
+    """Send an urgent SMS alert to the team phone number via GHL."""
+    import logging
+    _log = logging.getLogger("team_alert")
+    name = lead.get("name", "Unknown")
+    phone = lead.get("phone", "")
+    prop = lead.get("property_address", "")
+    msg = (
+        f"🚨 URGENT — {name} ({phone}) needs help at {prop}.\n"
+        f"Reason: {reason}\n"
+        f"Please call or text them NOW."
+    )
+    try:
+        # Find or create a conversation with the team phone number
+        resp = await client.post(
+            f"{GHL_API_BASE}/conversations/messages/outbound",
+            headers=ghl_headers(),
+            json={
+                "type": "SMS",
+                "phone": TEAM_ALERT_PHONE,
+                "message": msg,
+                "locationId": GHL_LOCATION_ID,
+            },
+        )
+        if resp.status_code in (200, 201):
+            _log.info(f"Team alert sent for {name}: {reason}")
+            return True
+        _log.error(f"Team alert failed: {resp.status_code} {resp.text[:200]}")
+        return False
+    except Exception as e:
+        _log.error(f"Team alert exception: {e}")
+        return False
+
+
 async def send_sms(client: httpx.AsyncClient, contact_id: str, message: str) -> dict:
     """Send an SMS message through GHL."""
     import logging
@@ -634,6 +672,19 @@ async def execute_action(
                 log_lines.append(f"  ❌ Appointment failed for {name}: {result['error']}")
             else:
                 log_lines.append(f"  📅 APPOINTMENT created for {name}: {appt_date} {appt_time}")
+
+    if action == "escalate_to_team":
+        reason = decision.get("escalation_reason", "Lead needs urgent assistance")
+        msg = decision.get("message", "I'm sorry for the trouble! Our team will call you shortly to help.")
+        if dry_run:
+            log_lines.append(f"  🚨 [DRY RUN] Would escalate {name} to team: {reason}")
+        else:
+            # SMS lead with apology
+            await send_sms(client, lead["contact_id"], msg)
+            # Alert team
+            alerted = await send_team_alert(client, lead, reason)
+            log_lines.append(f"  🚨 ESCALATED {name} to team (alert_sent={alerted}): {reason}")
+        return "\n".join(log_lines)
 
     if action == "trigger_voice_bot":
         if dry_run:
