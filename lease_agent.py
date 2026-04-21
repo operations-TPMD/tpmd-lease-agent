@@ -174,6 +174,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
                     "body": m.get("body", "")[:200],
                     "date": m.get("dateAdded", "")[:16],
                     "type": m.get("messageType", ""),
+                    "source": m.get("source", ""),  # "bot", "workflow", "" = human
                 })
 
     custom = parse_custom_fields(contact.get("customFields", []))
@@ -292,15 +293,16 @@ RULES:
 2. Max 2 proactive outbound SMS/day (ET). Instant replies to inbound are exempt.
 3. 3+ unanswered outbound in a row → wait 2 days before next SMS
 4. SMS max 160 chars (hard limit 300). Sign as "Sivan" or "The PMD team".
-5. Never send structurally identical messages back-to-back — skip instead.
+5. Never repeat content already said in the conversation. Before sending, scan ALL previous outbound messages — if the same information, link, or CTA was already sent, do NOT send it again in any form or wording. Exceptions: showing reminders (today/tomorrow) and the scheduling link if lead hasn't booked yet.
 6. Answer lead questions directly from PROPERTY DETAILS before any CTA.
 7. NEVER say "ID", "identity verification", or "upload ID". Use the schedule link only.
 8. Direct question from lead → TWO messages: answer in "message", CTA in "follow_up_message". Proactive → one message only.
 9. Days Since Showing = N/A → showing hasn't happened. NEVER ask "how was the showing?" yet.
 10. Lead responded today → no proactive follow-up. Respond only if they asked something.
 11. Honor what the lead said (rescheduled, confirmed, never went). Don't contradict them.
-12. Human team member already replied last → don't duplicate.
-13. Max 3 post-showing follow-up attempts. After 3 with no reply → skip forever.
+12. If the last outbound message was sent by a human (not the bot) within the last 20 minutes → action must be "skip". Do not send anything while a human agent may be actively handling the lead.
+13. If Last Human Reply Minutes Ago < 20 → skip, regardless of any other logic.
+14. Max 3 post-showing follow-up attempts. After 3 with no reply → skip forever.
 
 {custom_rules}
 
@@ -401,6 +403,19 @@ def _build_user_prompt(lead_context: dict) -> str:
     # Check if last inbound was today (lead already responded today)
     last_inbound_today = last_inbound_date == current_date_et if last_inbound_date else False
 
+    # Detect last human (non-bot) outbound message and how many minutes ago
+    last_human_reply_minutes_ago = None
+    now_dt = datetime.fromisoformat(lead_context['current_time'].replace('Z', '+00:00'))
+    for msg in lead_context.get("recent_messages", []):
+        if msg["direction"] == "outbound" and msg.get("source", "bot") not in ("bot", "automated", "workflow"):
+            try:
+                msg_dt = datetime.fromisoformat(msg["date"].replace('Z', '+00:00'))
+                diff_minutes = (now_dt - msg_dt).total_seconds() / 60
+                last_human_reply_minutes_ago = round(diff_minutes)
+            except Exception:
+                pass
+            break
+
     # Only include full listing if lead asked a property question — saves tokens
     QUESTION_KEYWORDS = ("rent", "price", "cost", "pet", "dog", "cat", "fee", "util", "park",
                          "avail", "bedroom", "bath", "sqft", "size", "where", "located", "how much",
@@ -426,6 +441,7 @@ Days Until Showing: {days_until_showing if days_until_showing is not None else '
 Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (showing has not happened yet)'}
 Post-Showing Outbound Messages Sent: {post_showing_outbound_count}
 Lead Responded Today: {last_inbound_today}
+Last Human Reply Minutes Ago: {last_human_reply_minutes_ago if last_human_reply_minutes_ago is not None else 'N/A'}
 Application URL: {lead_context['application_url'] if lead_context['application_url'] else 'Not available'}
 Schedule Showing Link: {lead_context['id_verification_url']}
 Reschedule Link: {lead_context['reschedule_url']}
