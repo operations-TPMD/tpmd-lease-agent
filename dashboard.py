@@ -522,6 +522,91 @@ async def _ghl_set_bot_rules(client: httpx.AsyncClient, rules: str) -> bool:
         return False
 
 
+@app.get("/api/stale-leads")
+async def api_stale_leads_preview():
+    """Preview leads with no inbound activity in 10+ days, excluding Application Sent and future showings."""
+    from datetime import datetime as dt, timezone, timedelta
+    cutoff = dt.now(timezone.utc) - timedelta(days=10)
+    EXEMPT_STAGES = {"Application Sent", "Leased / Won", "Lost", "Showing Scheduled"}
+
+    stale = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        opps = await get_all_opportunities(client)
+        for opp in opps:
+            stage_id = opp.get("pipelineStageId", "")
+            stage_name = STAGE_MAP.get(stage_id, "")
+            opp_status = opp.get("status", "")
+
+            if stage_name in ("Leased / Won", "Lost") or opp_status == "lost":
+                continue
+            if stage_name in EXEMPT_STAGES:
+                continue
+
+            contact_id = opp.get("contactId", "")
+            contact = opp.get("contact", {})
+            name = contact.get("name", contact_id)
+
+            # Check for future showing in calendar
+            appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
+            has_future_showing = False
+            now_iso = dt.now(timezone.utc).isoformat()
+            for appt in (appts or {}).get("events", []):
+                if appt.get("calendarId") == "I27t4Z2T7ZG0SQlI3Syd" and appt.get("startTime", "") > now_iso:
+                    has_future_showing = True
+                    break
+            if has_future_showing:
+                continue
+
+            # Check last inbound message date
+            convos = await ghl_get(client, "/conversations/search", {
+                "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
+            })
+            last_inbound = None
+            for conv in convos.get("conversations", []):
+                msgs = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 20})
+                for m in msgs.get("messages", {}).get("messages", []):
+                    if m.get("direction") == "inbound":
+                        last_inbound = m.get("dateAdded", "")
+                        break
+                if last_inbound:
+                    break
+
+            # Determine if stale
+            if not last_inbound:
+                # Never replied — check creation date
+                created = opp.get("createdAt", "")
+                if created and created < cutoff.isoformat():
+                    stale.append({"opp_id": opp["id"], "contact_id": contact_id, "name": name,
+                                  "stage": stage_name, "last_inbound": "Never", "created": created[:10]})
+            else:
+                try:
+                    last_dt = dt.fromisoformat(last_inbound.replace("Z", "+00:00"))
+                    if last_dt < cutoff:
+                        stale.append({"opp_id": opp["id"], "contact_id": contact_id, "name": name,
+                                      "stage": stage_name, "last_inbound": last_inbound[:10], "created": opp.get("createdAt","")[:10]})
+                except Exception:
+                    pass
+
+    return JSONResponse({"stale": stale, "count": len(stale)})
+
+
+@app.post("/api/stale-leads/archive")
+async def api_stale_leads_archive(request: Request):
+    """Move provided opportunity IDs to Lost."""
+    body = await request.json()
+    opp_ids = body.get("opp_ids", [])
+    results = {"moved": 0, "errors": 0}
+    async with httpx.AsyncClient(timeout=30) as client:
+        for opp_id in opp_ids:
+            try:
+                await update_stage(client, opp_id, "Lost")
+                results["moved"] += 1
+            except Exception as e:
+                logger.error(f"Failed to archive {opp_id}: {e}")
+                results["errors"] += 1
+    return JSONResponse(results)
+
+
 @app.get("/api/unavailable-properties/preview")
 async def api_preview_unavailable():
     """Dry-run: show which active leads would be affected by the current unavailable list."""
@@ -856,6 +941,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span class="scan-time" id="scanTime"></span>
     <button class="btn btn-outline" style="color:white;border-color:rgba(255,255,255,0.4)" onclick="openTrainModal()">🎓 Train Bot</button>
     <button class="btn btn-outline" style="color:#FCA5A5;border-color:rgba(252,165,165,0.5)" onclick="openUnavailableModal()">🚫 Unavailable Units</button>
+    <button class="btn btn-outline" style="color:#FCD34D;border-color:rgba(252,211,77,0.5)" onclick="openStaleModal()">🧹 Clean Up Stale</button>
     <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan All Leads</button>
   </div>
 </div>
@@ -890,6 +976,31 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <p style="font-size:12px;color:#7B6FA0;margin-bottom:14px">Rate recent bot responses. When you click ❌ you can explain what was wrong — it becomes a rule automatically.</p>
       <div id="feedbackList" style="display:flex;flex-direction:column;gap:10px;max-height:420px;overflow-y:auto">
         <div style="color:#B0A8CC;font-size:13px;text-align:center;padding:30px">Loading recent messages…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Stale Leads Modal -->
+<div id="staleModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow:auto">
+  <div style="background:white;max-width:640px;margin:40px auto;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="background:linear-gradient(135deg,#92400E,#D97706);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <span style="color:white;font-weight:700;font-size:16px">🧹 Clean Up Stale Leads</span>
+        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">No inbound reply in 10+ days</span>
+      </div>
+      <button onclick="closeStaleModal()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+    </div>
+    <div style="padding:20px">
+      <p style="font-size:12px;color:#7B6FA0;margin-bottom:14px">Excluded: Application Sent, Showing Scheduled (future), Leased/Won, Lost.</p>
+      <div id="staleLoading" style="text-align:center;padding:30px;color:#94a3b8;font-size:13px">Click "Scan" to find stale leads…</div>
+      <div id="staleList" style="display:none;max-height:360px;overflow-y:auto;display:none;flex-direction:column;gap:8px"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+        <button onclick="scanStaleLeads()" id="staleScanBtn" style="background:#FEF3C7;color:#92400E;border:1px solid #FCD34D;padding:8px 16px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">🔍 Scan</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="staleStatus" style="font-size:12px;color:#6B7280"></span>
+          <button id="staleArchiveBtn" onclick="archiveStaleLeads()" style="display:none;background:linear-gradient(135deg,#92400E,#D97706);color:white;border:none;padding:8px 20px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">Move All to Lost</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1293,6 +1404,78 @@ async function saveBotRules() {
   const data = await res.json();
   btn.textContent = data.status === 'saved' ? '✅ Saved!' : '❌ Error';
   setTimeout(() => { btn.textContent = 'Save Rules'; btn.disabled = false; }, 2000);
+}
+
+// ── Stale Leads Modal ────────────────────────────────────────────────────────
+let staleLeadsData = [];
+function openStaleModal() {
+  document.getElementById('staleModal').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+}
+function closeStaleModal() {
+  document.getElementById('staleModal').style.display = 'none';
+  document.body.style.overflow = '';
+}
+document.getElementById('staleModal').addEventListener('click', function(e) {
+  if (e.target === this) closeStaleModal();
+});
+
+async function scanStaleLeads() {
+  const btn = document.getElementById('staleScanBtn');
+  const loading = document.getElementById('staleLoading');
+  const list = document.getElementById('staleList');
+  const status = document.getElementById('staleStatus');
+  const archiveBtn = document.getElementById('staleArchiveBtn');
+
+  btn.textContent = 'Scanning…'; btn.disabled = true;
+  loading.style.display = 'block'; loading.textContent = 'Scanning leads… this may take a minute.';
+  list.style.display = 'none';
+  archiveBtn.style.display = 'none';
+  status.textContent = '';
+
+  const res = await fetch('/api/stale-leads');
+  const data = await res.json();
+  staleLeadsData = data.stale || [];
+
+  loading.style.display = 'none';
+  btn.textContent = '🔍 Scan'; btn.disabled = false;
+
+  if (staleLeadsData.length === 0) {
+    status.textContent = '✅ No stale leads found.';
+    return;
+  }
+
+  list.innerHTML = staleLeadsData.map((l, i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;border:1px solid #FDE68A;border-radius:8px;padding:10px 14px;background:#FFFBEB">
+      <div>
+        <div style="font-weight:600;font-size:13px;color:#1A1035">${l.name}</div>
+        <div style="font-size:11px;color:#92400E">${l.stage} · Last reply: ${l.last_inbound} · Created: ${l.created}</div>
+      </div>
+      <input type="checkbox" checked data-id="${l.opp_id}" style="width:16px;height:16px;cursor:pointer">
+    </div>
+  `).join('');
+  list.style.display = 'flex';
+  status.textContent = `${staleLeadsData.length} stale leads found`;
+  archiveBtn.style.display = 'block';
+}
+
+async function archiveStaleLeads() {
+  const checked = [...document.querySelectorAll('#staleList input[type=checkbox]:checked')];
+  const opp_ids = checked.map(el => el.dataset.id);
+  if (!opp_ids.length) return;
+
+  const archiveBtn = document.getElementById('staleArchiveBtn');
+  const status = document.getElementById('staleStatus');
+  archiveBtn.textContent = 'Moving…'; archiveBtn.disabled = true;
+
+  const res = await fetch('/api/stale-leads/archive', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({opp_ids})
+  });
+  const data = await res.json();
+  status.textContent = `✅ ${data.moved} moved to Lost${data.errors ? `, ${data.errors} errors` : ''}`;
+  archiveBtn.style.display = 'none';
+  await scanStaleLeads();
 }
 
 // ── Unavailable Properties Modal ─────────────────────────────────────────────
