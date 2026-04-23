@@ -59,7 +59,7 @@ async def periodic_scan(dry_run: bool = False) -> dict:
             opp_status = opp.get("status", "")
 
             # Skip terminal stages
-            if stage_name in ("Leased / Won", "Lost") or opp_status == "lost":
+            if stage_name in ("Leased / Won", "Lost", "Application Sent") or opp_status == "lost":
                 summary["skipped"] += 1
                 continue
 
@@ -196,6 +196,7 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                 "contact_id": contact_id,
                 "name": lead["name"],
                 "stage": stage_name,
+                "property_address": lead.get("property_address", ""),
                 "action": action,
                 "message": decision.get("message", ""),
                 "follow_up_message": follow_up,

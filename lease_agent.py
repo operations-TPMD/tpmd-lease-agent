@@ -130,8 +130,14 @@ def parse_custom_fields(custom_fields: list[dict]) -> dict:
     result = {}
     for field in custom_fields:
         field_id = field.get("id", "")
-        field_name = CUSTOM_FIELDS.get(field_id, field_id)
-        result[field_name] = field.get("value", "")
+        value = field.get("value", "")
+        if field_id in CUSTOM_FIELDS:
+            result[CUSTOM_FIELDS[field_id]] = value
+        else:
+            # Catch AI Summary and other unmapped fields by their key name
+            field_key = (field.get("fieldKey") or field.get("name") or "").lower().replace(" ", "_")
+            if "ai_summary" in field_key or field_key == "contact.ai_summary":
+                result["ai_summary"] = value
     return result
 
 
@@ -263,12 +269,19 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "property_summary": custom.get("property_summary", ""),
         "property_full_listing": custom.get("property_full_listing", ""),
         "property_headline": custom.get("property_headline", ""),
+        "ai_summary": custom.get("ai_summary", ""),
         "recent_messages": messages[:6],
         "current_time": now.isoformat(),
         "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
         "reschedule_url": _build_reschedule_url(contact, custom.get("property_address", "")),
         "access_code_url": await _get_trigger_link_url(client, contact_id),
+        "backup_lock_code": "",  # populated below after properties lookup
     }
+
+    # Look up backup lockbox code from the properties list
+    props_list = await get_properties_list(client)
+    lead_ctx["backup_lock_code"] = _get_backup_lock_code(lead_ctx["property_address"], props_list)
+    return lead_ctx
 
 
 # ── Step 3: Ask Claude what to do ────────────────────────────────────────────
@@ -329,6 +342,36 @@ async def get_unavailable_properties(client) -> list[str]:
     return []
 
 
+async def get_properties_list(client) -> list[dict]:
+    """Return full properties list (with backup_lock_code) from GHL Custom Values."""
+    try:
+        resp = await client.get(
+            f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
+            headers=ghl_headers(),
+        )
+        if resp.status_code == 200:
+            for cv in resp.json().get("customValues", []):
+                if cv.get("name") == "properties_list":
+                    raw = cv.get("value", "").strip()
+                    if raw:
+                        return json.loads(raw)
+    except Exception:
+        pass
+    return []
+
+
+def _get_backup_lock_code(property_address: str, properties_list: list[dict]) -> str:
+    """Look up the backup lockbox code for a given property address."""
+    if not property_address or not properties_list:
+        return ""
+    addr_lower = property_address.lower().strip()
+    for prop in properties_list:
+        prop_addr = prop.get("address", "").lower().strip()
+        if prop_addr and (addr_lower in prop_addr or prop_addr in addr_lower):
+            return prop.get("backup_lock_code", "")
+    return ""
+
+
 def _is_property_unavailable(property_address: str, unavailable_list: list[str]) -> bool:
     """Check if a property address matches any entry in the unavailable list."""
     if not property_address or not unavailable_list:
@@ -354,14 +397,19 @@ RULES:
 12. If the last outbound message was sent by a HUMAN (not the bot) within the last 20 minutes → action must be "skip". Do not send anything while a human agent may be actively handling the lead. Check "Last Outbound Message" field.
 13. Human handling window: If Last Outbound Message is "human" AND Minutes Ago < 20 → skip, regardless of any other logic.
 14. Max 3 post-showing follow-up attempts. After 3 with no reply → skip forever.
-15. EMERGENCY — LOCKBOX/ACCESS FAILURE: If the lead says the code or lockbox is not working AND the bot already tried the same code/answer once before in this conversation → action must be "escalate_to_team". Do NOT repeat the same code again. The team will be alerted by SMS.
+15. LOCKBOX/ACCESS FAILURE — use this two-step fallback:
+    Step 1: If the lead says the access code isn't working AND a "Backup Lock Code" is available AND the backup code has NOT already been sent in this conversation → send the backup code with a brief apology.
+    Step 2: If the backup code was already sent and still doesn't work, OR no backup code exists, OR the lead reports failure a second time → action must be "escalate_to_team". Do NOT repeat any code that has already failed.
 16. If the lead reports the same problem 2+ times with no resolution → action must be "escalate_to_team".
+17. AI Summary: If "AI Summary" is provided and the lead has responded but has no showing scheduled → read the summary, address the specific concern or objection raised in it. Don't ignore the summary.
+18. Voice bot calls (Verification Auto-Sent): Leads in "Verification Auto-Sent" with no showing_date and no showing scheduled may be called by the voice bot up to 2 times per day. Use action "trigger_voice_bot" for these leads when they haven't responded to SMS or when a call would move things forward. Do NOT trigger if the lead is in DND or if the tag "call_for_showing" was already added today twice.
+19. ID reminder after voice bot scheduling: If stage is "Showing Scheduled" AND id_status is "pending" or empty AND no message about ID/verification has been sent recently → send a gentle reminder that they need to complete verification to receive the property access code.
 
 {custom_rules}
 
 STAGE ACTIONS:
-- New Lead / Verification Auto-Sent / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing
-- Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip.
+- New Lead / Verification Auto-Sent / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing. Also consider trigger_voice_bot for Verification Auto-Sent leads.
+- Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip. If id_status is pending/empty → add ID reminder.
 - After Showing (Days Since Showing >= 0):
   * 0 attempts: "How was the showing?" warm, no application link yet
   * 1 attempt, no reply, 2+ days: different check-in
@@ -371,11 +419,11 @@ STAGE ACTIONS:
   * Negative reply → ask what issue, move to "Tenant Feedback"
   * Said never went / rescheduled → help reschedule, don't ask about showing
 - Tenant Feedback: address specific concern from PROPERTY DETAILS. If resolved → app link. If done → Lost.
-- Application Sent: Day 3 check-in, Day 5-6 reminder with link, Day 7+ final then stop.
+- Application Sent: SKIP entirely — do not process or message leads in this stage. The bot does not follow up after the application link is sent.
 
 STAGE MOVEMENT — always use send_sms_and_update_stage when moving:
 - Lead confirms showing date/time → "Showing Scheduled" + set appointment_date/time
-- Lead positive after showing → "Application Sent"
+- Lead positive after showing OR application link sent → "Application Sent"
 - Lead explicitly not interested → "Lost"
 - Lead had concerns after showing → "Tenant Feedback"
 
@@ -387,7 +435,7 @@ LINKS:
 
 RESPOND WITH EXACTLY THIS JSON:
 {
-  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "escalate_to_team" | "skip",
+  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "escalate_to_team" | "trigger_voice_bot" | "skip",
   "message": "SMS text to lead (for escalate_to_team: apologetic message to lead saying team will call them shortly)",
   "follow_up_message": "second SMS or empty string",
   "new_stage": "Stage Name or empty string",
@@ -514,7 +562,9 @@ Current Stage: {lead_context['stage']}
 Opportunity Status: {lead_context['opp_status']}
 Property: {lead_context['property_address'] or 'Not specified'}
 ID Verification: {lead_context['id_status'] or 'Not done'}
-Lock Code: {lead_context['lock_code'] if lead_context['lock_code'] else 'Not issued'}
+Lock Code (live): {lead_context['lock_code'] if lead_context['lock_code'] else 'Not issued'}
+Backup Lock Code: {lead_context['backup_lock_code'] if lead_context['backup_lock_code'] else 'None set'}
+AI Summary: {lead_context['ai_summary'] if lead_context['ai_summary'] else 'None'}
 Showing Date: {lead_context['showing_date'] or 'Not scheduled'}
 Days Until Showing: {days_until_showing if days_until_showing is not None else 'N/A'}
 Days Since Showing: {days_since_showing if days_since_showing is not None else 'N/A (showing has not happened yet or ended less than 1 hour ago)'}

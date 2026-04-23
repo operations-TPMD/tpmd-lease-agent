@@ -19,6 +19,13 @@ import json
 import asyncio
 from datetime import datetime, timezone, timedelta
 
+# Load .env file if present (for local development)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import base64
 import httpx
 import uvicorn
@@ -95,8 +102,8 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
     contact = opp.get("contact", {})
     name = contact.get("name", "Unknown")
 
-    # Quick skip for won/lost
-    if stage_name in ("Leased / Won", "Lost") or opp_status == "lost":
+    # Quick skip for terminal/complex stages
+    if stage_name in ("Leased / Won", "Lost", "Application Sent") or opp_status == "lost":
         return {
             "id": opp["id"], "contact_id": opp.get("contactId", ""),
             "name": name, "phone": contact.get("phone", ""),
@@ -117,8 +124,9 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
         try:
             lead = await enrich_lead(client, opp)
 
-            # Find last message and last call
+            # Find last message, last call, and last 6 SMS messages
             last_msg, last_msg_date, last_msg_dir, last_call_date = "", "", "", ""
+            recent_sms = []  # last 6 SMS for review panel
             convos = await client.get(
                 f"{GHL_API_BASE}/conversations/search",
                 headers=ghl_headers(),
@@ -133,10 +141,18 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
                 if msgs_resp.status_code == 200:
                     for m in msgs_resp.json().get("messages", {}).get("messages", []):
                         mtype = m.get("messageType", "")
-                        if mtype in ("TYPE_SMS", "TYPE_EMAIL") and not last_msg:
-                            last_msg = m.get("body", "")[:200]
-                            last_msg_date = m.get("dateAdded", "")[:16]
-                            last_msg_dir = m.get("direction", "")
+                        if mtype in ("TYPE_SMS", "TYPE_EMAIL"):
+                            if not last_msg:
+                                last_msg = m.get("body", "")[:200]
+                                last_msg_date = m.get("dateAdded", "")[:16]
+                                last_msg_dir = m.get("direction", "")
+                            if len(recent_sms) < 6:
+                                recent_sms.append({
+                                    "body": m.get("body", "")[:300],
+                                    "direction": m.get("direction", ""),
+                                    "date": m.get("dateAdded", "")[:16],
+                                    "source": m.get("source", ""),
+                                })
                         if mtype == "TYPE_CALL" and not last_call_date:
                             last_call_date = m.get("dateAdded", "")[:16]
 
@@ -178,6 +194,7 @@ async def _process_one_opp(client: httpx.AsyncClient, opp: dict, semaphore: asyn
                 "lock_code": lead.get("lock_code", ""),
                 "tags": lead.get("tags", []),
                 "days_since_last_activity": days_inactive,
+                "recent_sms": recent_sms,
                 "approved": False, "executed": False,
                 "available_templates": [{"id": t["id"], "name": t["name"], "category": t["category"]} for t in templates],
             }
@@ -404,6 +421,8 @@ async def api_webhook_inbound(request: Request):
         log_entry["bot_message"] = result.get("message", "")
         log_entry["bot_follow_up"] = result.get("follow_up_message", "")
         log_entry["lead_name"] = result.get("name", "")
+        log_entry["stage"] = result.get("stage", "")
+        log_entry["property"] = result.get("property_address", "")
     except Exception as e:
         logger.exception(f"Error in handle_inbound: {e}")
         log_entry["status"] = f"error: {str(e)[:50]}"
@@ -455,6 +474,89 @@ async def api_webhook_log():
         "total_received": len(webhook_log),
         "recent": webhook_log[-20:]  # Last 20 entries
     })
+
+
+@app.post("/api/test-chat")
+async def api_test_chat(request: Request):
+    """Simulate bot response for testing — no real SMS sent."""
+    try:
+        body = await request.json()
+        message = body.get("message", "")
+        stage = body.get("stage", "New Lead")
+        name = body.get("name", "Test Lead")
+        property_address = body.get("property_address", "")
+        property_summary = body.get("property_summary", "")
+        lock_code = body.get("lock_code", "")
+        backup_lock_code = body.get("backup_lock_code", "")
+        history = body.get("history", [])  # [{role:"lead"|"bot", text:"..."}]
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Build recent_messages from history + current inbound message
+        # ask_claude expects newest first
+        recent_messages = [{
+            "direction": "inbound",
+            "body": message,
+            "date": now_iso[:16],
+            "type": "TYPE_SMS",
+            "source": "",
+        }]
+        for entry in history[-5:]:
+            direction = "inbound" if entry["role"] == "lead" else "outbound"
+            source = "bot" if entry["role"] == "bot" else ""
+            recent_messages.append({
+                "direction": direction,
+                "body": entry["text"],
+                "date": now_iso[:16],
+                "type": "TYPE_SMS",
+                "source": source,
+            })
+
+        fake_lead = {
+            "opportunity_id": "test_opp",
+            "contact_id": "test_contact",
+            "name": name,
+            "phone": "+15551234567",
+            "email": "",
+            "tags": [],
+            "dnd": False,
+            "stage": stage,
+            "stage_id": "",
+            "opp_status": "open",
+            "opp_name": property_address or "Test Property",
+            "created_at": now_iso,
+            "last_stage_change": now_iso,
+            "property_address": property_address,
+            "id_status": "verified",
+            "lock_code": lock_code,
+            "backup_lock_code": backup_lock_code,
+            "showing_date": "",
+            "showing_time": "",
+            "application_url": "",
+            "special_offer": "",
+            "property_summary": property_summary,
+            "property_full_listing": property_summary,
+            "property_headline": "",
+            "recent_messages": recent_messages[:6],
+            "current_time": now_iso,
+            "id_verification_url": "https://example.com/schedule",
+            "reschedule_url": "https://example.com/reschedule",
+            "access_code_url": "",
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            decision = await ask_claude(client, fake_lead)
+
+        return JSONResponse({
+            "action": decision.get("action", "skip"),
+            "message": decision.get("message", ""),
+            "follow_up_message": decision.get("follow_up_message", ""),
+            "reasoning": decision.get("reasoning", ""),
+            "new_stage": decision.get("new_stage", ""),
+        })
+    except Exception as e:
+        logger.error(f"test-chat error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)[:200]}, status_code=500)
 
 
 BOT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_rules.txt")
@@ -607,86 +709,58 @@ async def api_stale_leads_archive(request: Request):
     return JSONResponse(results)
 
 
-@app.get("/api/unavailable-properties/preview")
-async def api_preview_unavailable():
-    """Dry-run: show which active leads would be affected by the current unavailable list."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        unavailable = await get_unavailable_properties(client)
-        if not unavailable:
-            return JSONResponse({"affected": [], "unavailable_list": []})
-
-        opps = await get_all_opportunities(client)
-        affected = []
-        for opp in opps:
-            stage_id = opp.get("pipelineStageId", "")
-            stage_name = STAGE_MAP.get(stage_id, "")
-            if stage_name in ("Leased / Won", "Lost") or opp.get("status") == "lost":
-                continue
-            contact = opp.get("contact", {})
-            # Get property address from custom fields without full enrich
-            prop_addr = ""
-            for cf in opp.get("customFields", []):
-                if cf.get("id") == "Vk9hcLmQAaoeLYYPbUUe":
-                    prop_addr = cf.get("value", "")
-                    break
-            if _is_property_unavailable(prop_addr, unavailable):
-                affected.append({
-                    "name": contact.get("name", opp.get("contactId", "?")),
-                    "property": prop_addr,
-                    "stage": stage_name,
-                    "opp_id": opp["id"],
-                })
-        return JSONResponse({"affected": affected, "unavailable_list": unavailable})
+async def _ghl_upsert_cv(client: httpx.AsyncClient, key: str, value: str):
+    """Upsert a GHL Custom Value by name."""
+    resp = await client.get(f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues", headers=ghl_headers())
+    cv_id = None
+    if resp.status_code == 200:
+        for cv in resp.json().get("customValues", []):
+            if cv.get("name") == key:
+                cv_id = cv.get("id"); break
+    if cv_id:
+        await client.put(f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues/{cv_id}", headers=ghl_headers(), json={"name": key, "value": value})
+    else:
+        await client.post(f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues", headers=ghl_headers(), json={"name": key, "value": value})
 
 
-@app.get("/api/unavailable-properties")
-async def api_get_unavailable_properties():
+async def _ghl_get_cv(client: httpx.AsyncClient, key: str) -> str:
+    """Read a GHL Custom Value by name."""
+    try:
+        resp = await client.get(f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues", headers=ghl_headers())
+        if resp.status_code == 200:
+            for cv in resp.json().get("customValues", []):
+                if cv.get("name") == key:
+                    return cv.get("value", "")
+    except Exception:
+        pass
+    return ""
+
+
+@app.get("/api/properties")
+async def api_get_properties():
+    """Get all properties with availability status."""
     async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            resp = await client.get(
-                f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
-                headers=ghl_headers(),
-            )
-            if resp.status_code == 200:
-                for cv in resp.json().get("customValues", []):
-                    if cv.get("name") == "unavailable_properties":
-                        return JSONResponse({"properties": cv.get("value", "")})
-        except Exception as e:
-            logger.warning(f"Could not read unavailable_properties from GHL: {e}")
-    return JSONResponse({"properties": ""})
+        raw = await _ghl_get_cv(client, "properties_list")
+    try:
+        props = json.loads(raw) if raw else []
+    except Exception:
+        props = []
+    return JSONResponse({"properties": props})
 
 
-@app.post("/api/unavailable-properties")
-async def api_set_unavailable_properties(request: Request):
+@app.post("/api/properties")
+async def api_set_properties(request: Request):
+    """Save properties list. Each item: {address, available, notes}"""
     try:
         body = await request.json()
-        properties = body.get("properties", "")
-        count = len([l for l in properties.splitlines() if l.strip()])
+        props = body.get("properties", [])
+        raw = json.dumps(props, ensure_ascii=False)
+        # Also update old unavailable_properties key for backward compat with lease_agent
+        unavailable_text = "\n".join(p["address"] for p in props if not p.get("available", True))
         async with httpx.AsyncClient(timeout=10) as client:
-            # Find existing custom value ID
-            resp = await client.get(
-                f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
-                headers=ghl_headers(),
-            )
-            cv_id = None
-            if resp.status_code == 200:
-                for cv in resp.json().get("customValues", []):
-                    if cv.get("name") == "unavailable_properties":
-                        cv_id = cv.get("id")
-                        break
-            if cv_id:
-                await client.put(
-                    f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues/{cv_id}",
-                    headers=ghl_headers(),
-                    json={"name": "unavailable_properties", "value": properties},
-                )
-            else:
-                await client.post(
-                    f"{GHL_API_BASE}/locations/{GHL_LOCATION_ID}/customValues",
-                    headers=ghl_headers(),
-                    json={"name": "unavailable_properties", "value": properties},
-                )
-        return JSONResponse({"status": "saved", "count": count})
+            await _ghl_upsert_cv(client, "properties_list", raw)
+            await _ghl_upsert_cv(client, "unavailable_properties", unavailable_text)
+        return JSONResponse({"status": "saved", "count": len(props)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -708,6 +782,46 @@ async def api_set_bot_rules(request: Request):
         return JSONResponse({"status": "saved", "chars": len(rules)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/lead-messages/{contact_id}")
+async def api_lead_messages(contact_id: str):
+    """Fetch last 6 SMS messages for a contact directly from GHL."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            convos_resp = await client.get(
+                f"{GHL_API_BASE}/conversations/search",
+                headers=ghl_headers(),
+                params={"locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1},
+            )
+            if convos_resp.status_code != 200:
+                return JSONResponse({"messages": []})
+            conversations = convos_resp.json().get("conversations", [])
+            if not conversations:
+                return JSONResponse({"messages": []})
+            conv_id = conversations[0]["id"]
+            msgs_resp = await client.get(
+                f"{GHL_API_BASE}/conversations/{conv_id}/messages",
+                headers=ghl_headers(),
+                params={"limit": 30},
+            )
+            if msgs_resp.status_code != 200:
+                return JSONResponse({"messages": []})
+            all_msgs = msgs_resp.json().get("messages", {}).get("messages", [])
+            sms_msgs = []
+            for m in all_msgs:
+                if m.get("messageType") in ("TYPE_SMS", "TYPE_EMAIL"):
+                    sms_msgs.append({
+                        "body": m.get("body", "")[:500],
+                        "direction": m.get("direction", ""),
+                        "date": m.get("dateAdded", "")[:16],
+                        "source": m.get("source", ""),
+                    })
+                    if len(sms_msgs) >= 6:
+                        break
+            return JSONResponse({"messages": sms_msgs})
+    except Exception as e:
+        return JSONResponse({"messages": [], "error": str(e)})
 
 
 @app.post("/api/bot-feedback")
@@ -928,6 +1042,90 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .modal h3 { margin-bottom: 12px; font-size: 16px; color: var(--purple); }
   .modal textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 13px; min-height: 80px; resize: vertical; font-family: inherit; }
   .modal .actions { display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end; }
+
+  /* Stage-grouped view */
+  .stage-section { margin: 0 24px 6px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 1px 4px rgba(123,47,190,0.05); }
+  .stage-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; background: white; cursor: pointer;
+    border-bottom: 1px solid var(--border); user-select: none;
+    transition: background 0.1s;
+  }
+  .stage-header:hover { background: var(--card2); }
+  .stage-header.collapsed { border-bottom: none; }
+  .stage-toggle { font-size: 11px; color: var(--faint); transition: transform 0.2s; width: 14px; }
+  .stage-toggle.collapsed { transform: rotate(-90deg); }
+  .stage-count { background: var(--purple); color: white; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 700; }
+  .stage-count.zero { background: var(--faint); }
+  .stage-act-count { background: var(--amber); color: white; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 700; }
+  .stage-avg { font-size: 11px; color: var(--faint); margin-left: auto; }
+  .stage-body { background: white; }
+  .stage-body.collapsed { display: none; }
+  .stage-row {
+    display: grid; grid-template-columns: 28px 1fr 180px 90px 110px 32px;
+    gap: 8px; align-items: center; padding: 9px 16px;
+    border-bottom: 1px solid var(--border); font-size: 12px;
+    transition: background 0.1s;
+  }
+  .stage-row:last-child { border-bottom: none; }
+  .stage-row:hover { background: var(--card2); }
+  .sr-lead { min-width: 0; }
+  .sr-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sr-sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sr-msg { font-size: 11px; color: var(--muted); min-width: 0; }
+  .sr-msg-body { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+  .sr-msg-meta { color: var(--faint); font-size: 10px; }
+  .sr-action { display: flex; flex-direction: column; gap: 3px; }
+  .sr-approve { width: 28px; height: 28px; border-radius: 6px; border: 2px solid var(--border); background: white; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px; color: white; transition: all 0.15s; flex-shrink: 0; }
+  .sr-approve:hover { border-color: var(--purple); }
+  .sr-approve.on { background: var(--grad); border-color: transparent; }
+  .sr-decision { font-size: 11px; background: #F8F7FC; border: 1px solid var(--border); border-left: 3px solid var(--purple); padding: 5px 7px; border-radius: 0 5px 5px 0; position: relative; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .sr-decision:hover { background: #F0EDFF; }
+
+  /* Test chat panel */
+  #testChatPanel {
+    position: fixed; right: 0; top: 0; bottom: 0; width: 380px;
+    background: white; border-left: 1px solid var(--border);
+    box-shadow: -4px 0 24px rgba(0,0,0,0.12);
+    z-index: 50; display: flex; flex-direction: column;
+    transform: translateX(100%); transition: transform 0.3s ease;
+  }
+  #testChatPanel.open { transform: translateX(0); }
+  .tc-header { background: var(--grad); padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  .tc-header h3 { color: white; font-size: 14px; font-weight: 700; }
+  .tc-close { background: rgba(255,255,255,0.2); border: none; color: white; width: 26px; height: 26px; border-radius: 50%; cursor: pointer; font-size: 14px; line-height: 1; }
+  .tc-config { padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--bg); flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+  .tc-config label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .tc-config select, .tc-config input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; background: white; color: var(--text); outline: none; }
+  .tc-config select:focus, .tc-config input:focus { border-color: var(--purple); }
+  .tc-messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .tc-msg-lead { align-self: flex-end; background: #EFF6FF; border-radius: 12px 12px 2px 12px; padding: 8px 12px; max-width: 85%; font-size: 12px; color: #1E3A5F; }
+  .tc-msg-bot { align-self: flex-start; background: #F3F0FF; border-radius: 12px 12px 12px 2px; padding: 8px 12px; max-width: 85%; font-size: 12px; color: var(--text); }
+  .tc-msg-bot .tc-reasoning { font-size: 10px; color: var(--faint); margin-top: 4px; font-style: italic; }
+  .tc-msg-bot .tc-action-badge { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; font-weight: 700; margin-bottom: 4px; background: #E9D5FF; color: #6D28D9; }
+  .tc-msg-bot .tc-stage-change { font-size: 10px; color: var(--purple); font-weight: 600; margin-top: 2px; }
+  .tc-msg-skip { align-self: center; color: var(--faint); font-size: 11px; font-style: italic; }
+  .tc-input-row { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; flex-shrink: 0; }
+  .tc-input { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; outline: none; resize: none; height: 38px; font-family: inherit; }
+  .tc-input:focus { border-color: var(--purple); }
+  .tc-send { background: var(--grad); color: white; border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 700; flex-shrink: 0; }
+  .tc-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Recent interactions */
+  .ri-section { margin: 12px 24px; border-radius: 10px; border: 1px solid var(--border); background: white; overflow: hidden; }
+  .ri-header { padding: 10px 16px; background: white; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+  .ri-header:hover { background: var(--card2); }
+  .ri-header.collapsed { border-bottom: none; }
+  .ri-body { max-height: 400px; overflow-y: auto; }
+  .ri-row { padding: 10px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 130px 120px 1fr; gap: 8px; align-items: start; font-size: 12px; cursor: pointer; }
+  .ri-row:last-child { border-bottom: none; }
+  .ri-row:hover { background: var(--card2); }
+  .ri-name { font-weight: 600; color: var(--text); }
+  .ri-time { font-size: 10px; color: var(--faint); }
+  .ri-msgs { min-width: 0; }
+  .ri-bubble-in { background: #F0FDF4; border-left: 2px solid #10B981; padding: 3px 7px; border-radius: 0 4px 4px 0; font-size: 11px; color: #065F46; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ri-bubble-out { background: #EFF6FF; border-left: 2px solid #3B82F6; padding: 3px 7px; border-radius: 0 4px 4px 0; font-size: 11px; color: #1E3A5F; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ri-no-data { padding: 20px; text-align: center; color: var(--faint); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -939,8 +1137,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <span class="scan-time" id="scanTime"></span>
+    <button class="btn btn-outline" style="color:#A5F3FC;border-color:rgba(165,243,252,0.5)" onclick="toggleTestChat()">🧪 Test Bot</button>
     <button class="btn btn-outline" style="color:white;border-color:rgba(255,255,255,0.4)" onclick="openTrainModal()">🎓 Train Bot</button>
-    <button class="btn btn-outline" style="color:#FCA5A5;border-color:rgba(252,165,165,0.5)" onclick="openUnavailableModal()">🚫 Unavailable Units</button>
+    <button class="btn btn-outline" style="color:#86EFAC;border-color:rgba(134,239,172,0.5)" onclick="openPropertiesModal()">🏠 Properties</button>
     <button class="btn btn-outline" style="color:#FCD34D;border-color:rgba(252,211,77,0.5)" onclick="openStaleModal()">🧹 Clean Up Stale</button>
     <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan All Leads</button>
   </div>
@@ -1006,31 +1205,78 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Unavailable Properties Modal -->
-<div id="unavailableModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow:auto">
-  <div style="background:white;max-width:560px;margin:40px auto;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
-    <div style="background:linear-gradient(135deg,#DC2626,#F97316);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+<!-- Properties Manager Modal -->
+<div id="propertiesModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow:auto">
+  <div style="background:white;max-width:600px;margin:40px auto;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="background:linear-gradient(135deg,#059669,#0D9488);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
       <div>
-        <span style="color:white;font-weight:700;font-size:16px">🚫 Unavailable Units</span>
-        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Bot will stop marketing these + notify leads</span>
+        <span style="color:white;font-weight:700;font-size:16px">🏠 Properties</span>
+        <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Manage property availability — used in Test Bot</span>
       </div>
-      <button onclick="closeUnavailableModal()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+      <button onclick="closePropertiesModal()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
     </div>
     <div style="padding:20px">
-      <p style="font-size:12px;color:#7B6FA0;margin-bottom:8px">One address per line. Leads with these properties will receive a "no longer available" message and be moved to Lost.</p>
-      <textarea id="unavailableText" style="width:100%;height:200px;border:1px solid #FECACA;border-radius:8px;padding:12px;font-size:13px;font-family:monospace;resize:vertical;color:#1A1035;outline:none;line-height:1.6" placeholder="10202 Valle Dr Tampa FL 33612&#10;1074 Bridlewood Way Brandon FL 33510"></textarea>
+      <div id="propList" style="display:flex;flex-direction:column;gap:8px;max-height:380px;overflow-y:auto;margin-bottom:12px"></div>
+      <button onclick="addProperty()" style="background:#F0FDF4;color:#059669;border:1px solid #BBF7D0;padding:8px 16px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px;width:100%">+ Add Property</button>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
-        <div style="display:flex;gap:8px;align-items:center">
-          <button onclick="previewUnavailable()" style="background:#FEF3C7;color:#92400E;border:1px solid #FCD34D;padding:8px 16px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">🔍 Preview Affected Leads</button>
-          <span id="unavailableSaveStatus" style="font-size:12px;color:#10B981"></span>
-        </div>
-        <button id="saveUnavailableBtn" onclick="saveUnavailableProperties()" style="background:linear-gradient(135deg,#DC2626,#F97316);color:white;border:none;padding:8px 22px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">Save</button>
-      </div>
-      <div id="unavailablePreview" style="display:none;margin-top:14px;border:1px solid #FECACA;border-radius:8px;padding:12px;background:#FFF5F5">
-        <div style="font-size:12px;font-weight:600;color:#DC2626;margin-bottom:8px">⚠️ These leads will be notified + moved to Lost:</div>
-        <div id="unavailablePreviewList" style="font-size:12px;color:#7F1D1D;line-height:1.8"></div>
+        <span id="propSaveStatus" style="font-size:12px;color:#10B981"></span>
+        <button onclick="saveProperties()" style="background:linear-gradient(135deg,#059669,#0D9488);color:white;border:none;padding:8px 22px;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px">Save All</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Test Chat Panel -->
+<div id="testChatPanel">
+  <div class="tc-header">
+    <h3>🧪 Test Bot Chat</h3>
+    <button class="tc-close" onclick="toggleTestChat()">✕</button>
+  </div>
+  <div class="tc-config">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div>
+        <label>Name</label>
+        <input id="tcName" value="Test Lead" placeholder="Lead name">
+      </div>
+      <div>
+        <label>Stage</label>
+        <select id="tcStage">
+          <option>New Lead</option>
+          <option>Verification Auto-Sent</option>
+          <option>Call: No Answer</option>
+          <option>Call: Answered</option>
+          <option>ID Verified</option>
+          <option>Showing Scheduled</option>
+          <option>Tenant Feedback</option>
+        </select>
+      </div>
+    </div>
+    <div>
+      <label>Property</label>
+      <select id="tcProperty" onchange="onTcPropertyChange()" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px;background:white;color:var(--text);outline:none">
+        <option value="">— Select property —</option>
+      </select>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div>
+        <label>Lock Code (live)</label>
+        <input id="tcLockCode" placeholder="e.g. 1234">
+      </div>
+      <div>
+        <label style="display:flex;align-items:center;gap:4px">🔑 Backup Code <span style="font-size:10px;color:var(--muted);font-weight:400">(auto-filled)</span></label>
+        <input id="tcBackupLockCode" placeholder="From property settings" style="background:#fffbe6">
+      </div>
+    </div>
+    <div style="display:flex;justify-content:flex-end">
+      <button onclick="clearTestChat()" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:5px 10px;border-radius:6px;font-size:11px;cursor:pointer">Clear chat</button>
+    </div>
+  </div>
+  <div class="tc-messages" id="tcMessages">
+    <div style="text-align:center;color:var(--faint);font-size:12px;padding:20px">Type a message below as if you were a lead.<br>The bot will respond (no real SMS sent).</div>
+  </div>
+  <div class="tc-input-row">
+    <textarea class="tc-input" id="tcInput" placeholder="Type as lead…" onkeydown="tcKeyDown(event)"></textarea>
+    <button class="tc-send" id="tcSend" onclick="sendTestMessage()">→</button>
   </div>
 </div>
 
@@ -1069,6 +1315,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Recent Interactions Panel -->
+<div class="ri-section" id="riSection" style="display:none">
+  <div class="ri-header" onclick="toggleRI()" id="riHeader">
+    <span class="stage-toggle" id="riToggle">▼</span>
+    <span style="font-weight:600;font-size:13px;color:var(--text)">Recent Bot Activity</span>
+    <span class="stage-count" id="riCount" style="background:var(--blue)">0</span>
+    <span style="font-size:11px;color:var(--faint);margin-left:auto">Live feed — updates on inbound messages</span>
+    <button onclick="event.stopPropagation();loadRI()" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:5px;font-size:11px;cursor:pointer;margin-left:8px">↻ Refresh</button>
+  </div>
+  <div class="ri-body" id="riBody">
+    <div class="ri-no-data">No interactions yet. The bot will appear here when it handles inbound messages.</div>
+  </div>
+</div>
+
 <div class="bar" id="bar" style="display:none">
   <div class="info"><strong id="nAprBar">0</strong> actions approved</div>
   <div style="display:flex;gap:8px">
@@ -1093,6 +1353,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <script>
 let leads = [], filter = 'all', editId = null;
+const STAGE_ORDER = ['New Lead','Verification Auto-Sent','Call: No Answer','Call: Answered',
+  'Manual Review Needed','Pending ID Review','ID Rejected','ID Verified',
+  'Showing Scheduled','Tenant Feedback','Application Sent'];
+const stageCollapsed = {};  // track collapsed state per stage
 
 async function startScan() {
   const b = document.getElementById('scanBtn');
@@ -1159,91 +1423,106 @@ function setF(f, el) {
   el.classList.add('on'); render();
 }
 
+function toggleStage(stage) {
+  stageCollapsed[stage] = !stageCollapsed[stage];
+  render();
+}
+
 function render() {
-  let fl = leads.filter(l => !['Lost','Leased / Won'].includes(l.stage));  // Always exclude terminal stages
+  let fl = leads.filter(l => !['Lost','Leased / Won','Application Sent'].includes(l.stage));
   if (filter === 'action') fl = fl.filter(l => !['skip','error'].includes(l.action));
   else if (filter === 'urgent') fl = fl.filter(l => (l.days_since_last_activity || 0) >= 3);
   else if (filter !== 'all') fl = fl.filter(l => l.action === filter);
 
-  fl.sort((a,b) => {
-    // Sort by: 1) days inactive (oldest first), 2) action priority
-    const days_diff = (b.days_since_last_activity || 0) - (a.days_since_last_activity || 0);
-    if (days_diff !== 0) return days_diff;
-    const o = {send_sms_and_update_stage:0, send_sms:1, update_stage:2, call_for_showing:3, error:4, skip:5};
-    return (o[a.action]??6) - (o[b.action]??6);
-  });
-
   if (!fl.length) { document.getElementById('content').innerHTML = '<div class="center"><p style="color:#64748b">No leads match this filter</p></div>'; return; }
 
-  let h = `<div class="tc"><table><thead><tr>
-    <th style="width:40px;min-width:40px"></th>
-    <th>Lead</th>
-    <th>Stage</th>
-    <th>Activity</th>
-    <th>Action</th>
-    <th>Decision</th>
-    <th style="width:60px"></th>
-  </tr></thead><tbody>`;
-
+  // Group by stage in pipeline order
+  const byStage = {};
+  for (const s of STAGE_ORDER) byStage[s] = [];
   for (const l of fl) {
-    const isAct = !['skip','error'].includes(l.action);
-    const cls = l.executed ? 'done' : '';
-
-    // Lead cell
-    const firstName = l.name?.split(' ')[0] || 'Unknown';
-    const tags = (l.tags||[]).map(t => `<span class="tag">${t}</span>`).join('');
-
-    // Activity cell
-    const daysCls = l.days_since_last_activity >= 3 ? 'act-warn' : l.days_since_last_activity >= 1 ? 'act-val' : 'act-ok';
-    const daysText = l.days_since_last_activity !== null ? `${l.days_since_last_activity}d ago` : '—';
-    const dirCls = l.last_message_direction === 'inbound' ? 'dir-in' : 'dir-out';
-    const dirIcon = l.last_message_direction === 'inbound' ? '← IN' : '→ OUT';
-    const idBadge = l.id_status === 'verified' ? '<span class="badge s-show">ID OK</span>' : l.id_status ? `<span class="badge s-lost">${l.id_status}</span>` : '';
-
-    // Decision cell
-    let decisionHtml = '';
-    if (l.message) {
-      decisionHtml += `<div class="decision-msg">"${esc(l.message)}"<button class="edit-btn" onclick="openEdit('${l.id}')">edit</button></div>`;
-    }
-    if (l.new_stage) decisionHtml += `<div class="stage-change">→ ${l.new_stage}</div>`;
-    decisionHtml += `<div class="decision-reason">${esc(l.reasoning||'')}</div>`;
-
-    // Template selector
-    if (isAct && !l.executed && l.available_templates?.length) {
-      decisionHtml += `<div class="tmpl-select"><select onchange="applyTmpl('${l.id}',this.value)"><option value="">Use template...</option>`;
-      for (const t of l.available_templates) {
-        decisionHtml += `<option value="${t.id}">${t.name}</option>`;
-      }
-      decisionHtml += '</select></div>';
-    }
-
-    h += `<tr class="${cls}">
-      <td style="text-align:center">
-        ${isAct && !l.executed ? `<button class="chk ${l.approved?'on':''}" onclick="toggleApprove('${l.id}')" title="${l.action==='call_for_showing'?'Approve to trigger voice bot call':'Approve'}">${l.approved?'✓':''}</button>` : ''}
-        ${l.action==='call_for_showing' && !l.executed ? `<div style="font-size:9px;color:#D97706;margin-top:2px">📞</div>` : ''}
-      </td>
-      <td>
-        <div class="lead-name">${esc(l.name||'Unknown')}</div>
-        <div class="lead-phone">${l.phone||''} ${l.email?'· '+l.email:''}</div>
-        <div class="lead-addr">${esc(l.property_address||'')}</div>
-        <div class="lead-tags">${tags} ${idBadge}</div>
-      </td>
-      <td><span class="badge ${sc(l.stage)}">${l.stage}</span></td>
-      <td>
-        <div class="act-row"><span class="act-label">Last msg:</span><span class="${daysCls}">${daysText}</span> <span class="${dirCls}" style="font-size:10px">${l.last_message_direction ? dirIcon : ''}</span></div>
-        <div class="act-row"><span class="act-label">Last call:</span><span class="act-val">${l.last_call_date ? l.last_call_date.slice(0,10) : '—'}</span></div>
-        <div class="act-row"><span class="act-label">Showing:</span><span class="${l.showing_date?'act-ok':'act-val'}">${l.showing_date||'—'}</span></div>
-        ${l.last_message ? `<div class="msg-preview" title="${esc(l.last_message)}">${esc(l.last_message)}</div>` : ''}
-      </td>
-      <td><span class="badge ${ac(l.action)}">${al(l.action)}</span></td>
-      <td>${decisionHtml}</td>
-      <td>
-        ${l.stage === 'ID Verified' || l.stage === 'Call: No Answer' ? `<button class="btn btn-voice btn-sm" onclick="triggerVoice('${l.contact_id}','${firstName}')" title="Trigger voice bot call">Call</button>` : ''}
-      </td>
-    </tr>`;
+    if (!byStage[l.stage]) byStage[l.stage] = [];
+    byStage[l.stage].push(l);
   }
 
-  h += '</tbody></table></div>';
+  let h = '<div style="padding:0 0 120px">';
+  for (const stageName of STAGE_ORDER) {
+    const group = byStage[stageName] || [];
+    if (!group.length) continue;
+
+    // Sort by last_message_date desc (most recent first)
+    group.sort((a, b) => {
+      const da = a.last_message_date || '';
+      const db = b.last_message_date || '';
+      if (db > da) return 1; if (da > db) return -1;
+      // secondary: action priority
+      const o = {send_sms_and_update_stage:0, send_sms:1, update_stage:2, call_for_showing:3, error:4, skip:5};
+      return (o[a.action]??6) - (o[b.action]??6);
+    });
+
+    const actionCount = group.filter(l => !['skip','error'].includes(l.action)).length;
+    const collapsed = !!stageCollapsed[stageName];
+    const avgDays = group.filter(l => l.days_since_last_activity !== null).length
+      ? (group.reduce((s, l) => s + (l.days_since_last_activity||0), 0) / group.length).toFixed(1)
+      : null;
+
+    h += `<div class="stage-section">
+      <div class="stage-header${collapsed?' collapsed':''}" onclick="toggleStage('${stageName}')">
+        <span class="stage-toggle${collapsed?' collapsed':''}">▼</span>
+        <span class="badge ${sc(stageName)}" style="font-size:12px">${stageName}</span>
+        <span class="stage-count${group.length===0?' zero':''}">${group.length}</span>
+        ${actionCount ? `<span class="stage-act-count">${actionCount} action${actionCount>1?'s':''}</span>` : ''}
+        ${avgDays !== null ? `<span class="stage-avg">avg ${avgDays}d since msg</span>` : ''}
+      </div>
+      <div class="stage-body${collapsed?' collapsed':''}">`;
+
+    for (const l of group) {
+      const isAct = !['skip','error'].includes(l.action);
+      const daysCls = (l.days_since_last_activity||0) >= 3 ? 'act-warn' : (l.days_since_last_activity||0) >= 1 ? 'act-val' : 'act-ok';
+      const daysText = l.days_since_last_activity !== null ? `${l.days_since_last_activity}d` : '—';
+      const dirIcon = l.last_message_direction === 'inbound' ? '↙' : '↗';
+      const dirCls = l.last_message_direction === 'inbound' ? 'dir-in' : 'dir-out';
+      const decisionPreview = l.message ? `"${esc(l.message.slice(0,80))}${l.message.length>80?'…':''}"` : (l.reasoning ? esc(l.reasoning.slice(0,80)) : '');
+      const firstName = l.name?.split(' ')[0] || 'Unknown';
+
+      h += `<div class="stage-row${l.executed?' done':''}">
+        <div>
+          ${isAct && !l.executed
+            ? `<button class="sr-approve${l.approved?' on':''}" onclick="toggleApprove('${l.id}')" title="Approve">${l.approved?'✓':''}</button>`
+            : `<div style="width:28px"></div>`}
+        </div>
+        <div class="sr-lead">
+          <div class="sr-name" title="${esc(l.name||'')}">${esc(l.name||'Unknown')}</div>
+          <div class="sr-sub">${l.phone||''}</div>
+          <div class="sr-sub" style="color:var(--faint)" title="${esc(l.property_address||'')}">${esc(l.property_address||'')}</div>
+          ${l.showing_date ? `<div class="sr-sub" style="color:var(--green)">📅 ${l.showing_date}</div>` : ''}
+        </div>
+        <div class="sr-msg">
+          ${l.last_message ? `<div class="sr-msg-body" title="${esc(l.last_message)}">${esc(l.last_message.slice(0,60))}${l.last_message.length>60?'…':''}</div>` : '<div style="color:var(--faint);font-size:11px">No messages</div>'}
+          <div class="sr-msg-meta"><span class="${daysCls}">${daysText}</span> <span class="${dirCls}">${l.last_message_direction?dirIcon:''}</span> ${l.last_message_date?l.last_message_date.slice(0,10):''}</div>
+        </div>
+        <div class="sr-action">
+          <span class="badge ${ac(l.action)}" style="font-size:11px">${al(l.action)}</span>
+          ${l.new_stage ? `<span style="font-size:10px;color:var(--purple);font-weight:600">→ ${l.new_stage}</span>` : ''}
+        </div>
+        <div>
+          ${isAct && decisionPreview
+            ? `<div class="sr-decision" onclick="openEdit('${l.id}')" title="${esc(l.reasoning||'')}">${decisionPreview}</div>`
+            : `<div style="font-size:11px;color:var(--faint)">${esc((l.reasoning||'').slice(0,60))}</div>`}
+          ${l.available_templates?.length && isAct && !l.executed
+            ? `<select style="margin-top:3px;border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:10px;color:var(--muted);max-width:110px" onchange="applyTmpl('${l.id}',this.value)"><option value="">Template…</option>${l.available_templates.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}</select>`
+            : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          ${l.stage === 'ID Verified' || l.stage === 'Call: No Answer'
+            ? `<button class="btn btn-voice btn-sm" onclick="triggerVoice('${l.contact_id}','${firstName}')">📞</button>`
+            : ''}
+          <button style="background:#F5F3FF;color:#7B2FBE;border:1px solid #DDD6FE;border-radius:5px;padding:2px 7px;font-size:10px;cursor:pointer;white-space:nowrap" onclick="openConvReview('${l.id}')">💬 Review</button>
+        </div>
+      </div>`;
+    }
+    h += '</div></div>';
+  }
+  h += '</div>';
   document.getElementById('content').innerHTML = h;
 }
 
@@ -1361,7 +1640,9 @@ async function toggleScheduler() {
 
 load();
 loadScheduler();
+loadRI();
 setInterval(loadScheduler, 30000);
+setInterval(loadRI, 60000);  // refresh recent interactions every minute
 
 // ── Train Bot Modal ───────────────────────────────────────────────────────────
 function openTrainModal() {
@@ -1478,61 +1759,118 @@ async function archiveStaleLeads() {
   await scanStaleLeads();
 }
 
-// ── Unavailable Properties Modal ─────────────────────────────────────────────
-function openUnavailableModal() {
-  document.getElementById('unavailableModal').style.display = 'block';
+// ── Properties Manager Modal ──────────────────────────────────────────────────
+let propertiesList = [];
+
+function openPropertiesModal() {
+  document.getElementById('propertiesModal').style.display = 'block';
   document.body.style.overflow = 'hidden';
-  loadUnavailableProperties();
+  loadProperties();
 }
-function closeUnavailableModal() {
-  document.getElementById('unavailableModal').style.display = 'none';
+function closePropertiesModal() {
+  document.getElementById('propertiesModal').style.display = 'none';
   document.body.style.overflow = '';
 }
-document.getElementById('unavailableModal').addEventListener('click', function(e) {
-  if (e.target === this) closeUnavailableModal();
+document.getElementById('propertiesModal').addEventListener('click', function(e) {
+  if (e.target === this) closePropertiesModal();
 });
 
-async function loadUnavailableProperties() {
-  const res = await fetch('/api/unavailable-properties');
+async function loadProperties() {
+  const res = await fetch('/api/properties');
   const data = await res.json();
-  document.getElementById('unavailableText').value = data.properties || '';
+  propertiesList = data.properties || [];
+  renderPropList();
+  // Also populate test chat dropdown
+  refreshPropertyDropdown();
 }
 
-async function previewUnavailable() {
-  const previewEl = document.getElementById('unavailablePreview');
-  const listEl = document.getElementById('unavailablePreviewList');
-  listEl.textContent = 'Loading…';
-  previewEl.style.display = 'block';
-  const res = await fetch('/api/unavailable-properties/preview');
-  const data = await res.json();
-  if (!data.affected || data.affected.length === 0) {
-    listEl.innerHTML = '<span style="color:#065F46">✅ No active leads would be affected.</span>';
+function renderPropList() {
+  const el = document.getElementById('propList');
+  if (!propertiesList.length) {
+    el.innerHTML = '<div style="text-align:center;color:var(--faint);padding:20px;font-size:13px">No properties yet. Click "+ Add Property" below.</div>';
     return;
   }
-  listEl.innerHTML = data.affected.map(a =>
-    `• <strong>${a.name}</strong> — ${a.property || 'no address'} <span style="color:#9CA3AF">(${a.stage})</span>`
-  ).join('<br>');
+  el.innerHTML = propertiesList.map((p, i) => `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:${p.available===false?'#FFF5F5':'#F0FDF4'}">
+      <div style="display:grid;grid-template-columns:1fr 90px 80px 32px;gap:8px;align-items:center">
+        <input value="${esc(p.address||'')}" oninput="propertiesList[${i}].address=this.value" placeholder="Address" style="border:1px solid var(--border);border-radius:5px;padding:5px 8px;font-size:12px;outline:none;width:100%">
+        <input value="${esc(p.notes||'')}" oninput="propertiesList[${i}].notes=this.value" placeholder="Notes" style="border:1px solid var(--border);border-radius:5px;padding:5px 8px;font-size:12px;outline:none;width:100%">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:600;color:${p.available===false?'var(--red)':'var(--green)'}">
+          <input type="checkbox" ${p.available!==false?'checked':''} onchange="propertiesList[${i}].available=this.checked;renderPropList()" style="cursor:pointer">
+          ${p.available!==false?'Available':'Unavailable'}
+        </label>
+        <button onclick="propertiesList.splice(${i},1);renderPropList()" style="background:#FEE2E2;border:none;color:#DC2626;border-radius:5px;cursor:pointer;padding:4px 8px;font-size:13px">✕</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">🔑 Backup code:</span>
+        <input value="${esc(p.backup_lock_code||'')}" oninput="propertiesList[${i}].backup_lock_code=this.value" placeholder="Static lockbox code (fallback if live code fails)" style="border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:12px;outline:none;flex:1;background:#fffbe6">
+      </div>
+    </div>
+  `).join('');
 }
 
-async function saveUnavailableProperties() {
-  const properties = document.getElementById('unavailableText').value;
-  const btn = document.getElementById('saveUnavailableBtn');
-  const status = document.getElementById('unavailableSaveStatus');
+function addProperty() {
+  const i = propertiesList.length;
+  propertiesList.push({address:'', available:true, notes:'', backup_lock_code:''});
+  // Append only the new row instead of re-rendering everything (preserves unsaved input values)
+  const el = document.getElementById('propList');
+  if (el.querySelector('div[style*="text-align:center"]')) el.innerHTML = '';
+  const row = document.createElement('div');
+  row.style.cssText = 'border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:#F0FDF4';
+  row.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 90px 80px 32px;gap:8px;align-items:center">
+      <input oninput="propertiesList[${i}].address=this.value" placeholder="Address" style="border:1px solid var(--border);border-radius:5px;padding:5px 8px;font-size:12px;outline:none;width:100%">
+      <input oninput="propertiesList[${i}].notes=this.value" placeholder="Notes" style="border:1px solid var(--border);border-radius:5px;padding:5px 8px;font-size:12px;outline:none;width:100%">
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:600;color:var(--green)">
+        <input type="checkbox" checked onchange="propertiesList[${i}].available=this.checked;renderPropList()" style="cursor:pointer">
+        Available
+      </label>
+      <button onclick="propertiesList.splice(${i},1);renderPropList()" style="background:#FEE2E2;border:none;color:#DC2626;border-radius:5px;cursor:pointer;padding:4px 8px;font-size:13px">✕</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+      <span style="font-size:11px;color:var(--muted);white-space:nowrap">🔑 Backup code:</span>
+      <input oninput="propertiesList[${i}].backup_lock_code=this.value" placeholder="Static lockbox code (fallback if live code fails)" style="border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:12px;outline:none;flex:1;background:#fffbe6">
+    </div>`;
+  el.appendChild(row);
+  row.querySelector('input').focus();
+}
+
+async function saveProperties() {
+  const btn = document.querySelector('#propertiesModal button[onclick="saveProperties()"]');
+  const status = document.getElementById('propSaveStatus');
   btn.textContent = 'Saving…'; btn.disabled = true;
-  const res = await fetch('/api/unavailable-properties', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({properties})
+  const valid = propertiesList.filter(p => p.address?.trim());
+  const res = await fetch('/api/properties', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({properties: valid})
   });
   const data = await res.json();
-  if (data.status === 'saved') {
-    status.textContent = `✅ Saved (${data.count} properties)`;
-    btn.textContent = 'Save';
-  } else {
-    status.textContent = '❌ Error saving';
-    btn.textContent = 'Save';
-  }
-  btn.disabled = false;
-  setTimeout(() => { status.textContent = ''; }, 3000);
+  btn.textContent = 'Save All'; btn.disabled = false;
+  status.textContent = data.status === 'saved' ? `✅ Saved ${data.count} properties` : '❌ Error';
+  setTimeout(() => status.textContent = '', 3000);
+  propertiesList = valid;
+  renderPropList();
+  refreshPropertyDropdown();
+}
+
+function refreshPropertyDropdown() {
+  const sel = document.getElementById('tcProperty');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">— Select property —</option>' +
+    propertiesList.filter(p=>p.address?.trim()).map(p =>
+      `<option value="${esc(p.address)}" data-notes="${esc(p.notes||'')}" data-backup-lock-code="${esc(p.backup_lock_code||'')}" ${p.available===false?'style="color:var(--red)"':''}>${esc(p.address)}${p.available===false?' 🚫':''}</option>`
+    ).join('');
+  if (current) sel.value = current;
+  onTcPropertyChange();
+}
+
+function onTcPropertyChange() {
+  const sel = document.getElementById('tcProperty');
+  if (!sel) return;
+  const opt = sel.selectedOptions[0];
+  const backupInput = document.getElementById('tcBackupLockCode');
+  if (backupInput) backupInput.value = opt?.dataset.backupLockCode || '';
 }
 
 async function loadFeedbackList() {
@@ -1589,7 +1927,315 @@ async function submitFeedback(i) {
   document.getElementById(`fb${i}`).style.background = '#FEF2F2';
   document.getElementById(`fbtxt${i}`).innerHTML = '<div style="color:#059669;font-size:12px;font-weight:600">✅ Rule added! Bot will avoid this in future messages.</div>';
 }
+
+// ── Test Chat ─────────────────────────────────────────────────────────────────
+let tcHistory = [];
+
+function toggleTestChat() {
+  const panel = document.getElementById('testChatPanel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) {
+    // Load properties into dropdown if not already loaded
+    if (document.getElementById('tcProperty').options.length <= 1) {
+      fetch('/api/properties').then(r=>r.json()).then(d=>{
+        propertiesList = d.properties || [];
+        refreshPropertyDropdown();
+      });
+    }
+    setTimeout(() => document.getElementById('tcInput').focus(), 300);
+  }
+}
+
+function clearTestChat() {
+  tcHistory = [];
+  document.getElementById('tcMessages').innerHTML = '<div style="text-align:center;color:var(--faint);font-size:12px;padding:20px">Type a message below as if you were a lead.<br>The bot will respond (no real SMS sent).</div>';
+}
+
+function tcKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTestMessage(); }
+}
+
+function tcAppend(html) {
+  const msgs = document.getElementById('tcMessages');
+  // Remove placeholder text on first message
+  if (msgs.querySelector('div[style*="padding:20px"]')) msgs.innerHTML = '';
+  msgs.insertAdjacentHTML('beforeend', html);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+async function sendTestMessage() {
+  const input = document.getElementById('tcInput');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  document.getElementById('tcSend').disabled = true;
+
+  tcAppend(`<div class="tc-msg-lead">${esc(msg)}</div>`);
+  tcHistory.push({role: 'lead', text: msg});
+
+  // Typing indicator
+  const tid = 'tc-typing-' + Date.now();
+  tcAppend(`<div class="tc-msg-bot" id="${tid}" style="color:var(--faint);font-style:italic">Bot is thinking…</div>`);
+
+  const propSel = document.getElementById('tcProperty');
+  const propAddress = propSel.value;
+  const propNotes = propSel.selectedOptions[0]?.dataset.notes || '';
+
+  try {
+    const res = await fetch('/api/test-chat', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        message: msg,
+        stage: document.getElementById('tcStage').value,
+        name: document.getElementById('tcName').value || 'Test Lead',
+        property_address: propAddress,
+        property_summary: propNotes,
+        lock_code: document.getElementById('tcLockCode').value,
+        backup_lock_code: document.getElementById('tcBackupLockCode').value,
+        history: tcHistory.slice(0, -1),
+      })
+    });
+    const d = await res.json();
+    const el = document.getElementById(tid);
+    if (el) el.remove();
+
+    if (d.error) {
+      tcAppend(`<div class="tc-msg-bot" style="color:var(--red)">Error: ${esc(d.error)}</div>`);
+    } else if (d.action === 'skip') {
+      tcAppend(`<div class="tc-msg-skip">⏭ Bot would skip — ${esc(d.reasoning||'no action needed')}</div>`);
+    } else {
+      const fbId = 'tcfb-' + Date.now();
+      let botHtml = `<div class="tc-msg-bot" id="${fbId}">
+        <div class="tc-action-badge">${al(d.action)}</div>`;
+      if (d.message) {
+        botHtml += `<div>${esc(d.message)}</div>`;
+        tcHistory.push({role: 'bot', text: d.message});
+      }
+      if (d.follow_up_message) {
+        botHtml += `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed #C4B5FD">${esc(d.follow_up_message)}</div>`;
+      }
+      if (d.new_stage) botHtml += `<div class="tc-stage-change">→ ${esc(d.new_stage)}</div>`;
+      if (d.reasoning) botHtml += `<div class="tc-reasoning">${esc(d.reasoning)}</div>`;
+      // Feedback buttons
+      botHtml += `<div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+        <button onclick="tcRate('${fbId}','good','${encodeURIComponent(msg)}','${encodeURIComponent(d.message||'')}')" style="background:#D1FAE5;border:none;color:#065F46;padding:2px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600">👍</button>
+        <button onclick="tcRate('${fbId}','bad','${encodeURIComponent(msg)}','${encodeURIComponent(d.message||'')}')" style="background:#FEE2E2;border:none;color:#991B1B;padding:2px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600">👎 Needs fix</button>
+      </div>
+      <div id="${fbId}-input" style="display:none;margin-top:6px">
+        <textarea placeholder="מה הבוט היה צריך לענות/לעשות אחרת?" style="width:100%;height:55px;border:1px solid var(--border);border-radius:6px;padding:6px;font-size:11px;resize:none;outline:none;font-family:inherit"></textarea>
+        <button onclick="tcSubmitFeedback('${fbId}','${encodeURIComponent(msg)}','${encodeURIComponent(d.message||'')}')" style="margin-top:4px;background:var(--grad);color:white;border:none;padding:4px 14px;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600">Add as Rule →</button>
+      </div>`;
+      botHtml += '</div>';
+      tcAppend(botHtml);
+    }
+  } catch(e) {
+    const el = document.getElementById(tid);
+    if (el) el.remove();
+    tcAppend(`<div class="tc-msg-bot" style="color:var(--red)">Error: ${esc(e.message)}</div>`);
+  }
+  document.getElementById('tcSend').disabled = false;
+  document.getElementById('tcInput').focus();
+}
+
+function tcRate(fbId, rating, encodedMsg, encodedBot) {
+  if (rating === 'good') {
+    const el = document.getElementById(fbId);
+    if (el) el.style.opacity = '0.6';
+  } else {
+    const inp = document.getElementById(fbId + '-input');
+    if (inp) { inp.style.display = 'block'; inp.querySelector('textarea')?.focus(); }
+  }
+}
+
+async function tcSubmitFeedback(fbId, encodedMsg, encodedBot) {
+  const inpEl = document.getElementById(fbId + '-input');
+  const ta = inpEl?.querySelector('textarea');
+  const feedback = ta?.value?.trim();
+  if (!feedback) return;
+  await fetch('/api/bot-feedback', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({inbound: decodeURIComponent(encodedMsg), bot_message: decodeURIComponent(encodedBot), feedback, rating:'bad'})
+  });
+  inpEl.innerHTML = '<div style="color:var(--green);font-size:11px;font-weight:600">✅ Rule added!</div>';
+}
+
+// ── Recent Interactions ───────────────────────────────────────────────────────
+let riCollapsed = false;
+
+function toggleRI() {
+  riCollapsed = !riCollapsed;
+  document.getElementById('riBody').style.display = riCollapsed ? 'none' : 'block';
+  document.getElementById('riToggle').classList.toggle('collapsed', riCollapsed);
+  document.getElementById('riHeader').classList.toggle('collapsed', riCollapsed);
+}
+
+async function loadRI() {
+  try {
+    const r = await fetch('/api/webhook-log');
+    const d = await r.json();
+    const entries = (d.recent || []).filter(e => e.status !== 'received').reverse();
+    const sec = document.getElementById('riSection');
+    const body = document.getElementById('riBody');
+    const cnt = document.getElementById('riCount');
+
+    cnt.textContent = entries.length;
+    if (!entries.length) { sec.style.display = 'none'; return; }
+    sec.style.display = 'block';
+
+    if (riCollapsed) return;
+
+    body.innerHTML = entries.slice(0, 10).map((e, idx) => {
+      const timeStr = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit'}) : '';
+      const stageStr = e.stage || '';
+      const propStr = e.property || '';
+      const leadMsg = e.message ? `<div class="ri-bubble-in">← ${esc(e.message.slice(0,100))}</div>` : '';
+      const riId = `ri-${idx}`;
+      const botMsgHtml = e.bot_message ? `
+        <div class="ri-bubble-out" style="position:relative">
+          → ${esc(e.bot_message.slice(0,100))}
+          <span style="margin-left:6px;cursor:pointer;font-size:11px" onclick="riToggleFeedback('${riId}')">👎</span>
+        </div>
+        <div id="${riId}-fb" style="display:none;margin-top:4px;padding:6px;background:#F8F7FC;border-radius:6px">
+          <textarea placeholder="מה הבוט היה צריך לעשות אחרת?" style="width:100%;height:50px;border:1px solid var(--border);border-radius:5px;padding:5px;font-size:11px;resize:none;outline:none;font-family:inherit"></textarea>
+          <button onclick="riSubmitFeedback('${riId}','${encodeURIComponent(e.message||'')}','${encodeURIComponent(e.bot_message||'')}')" style="margin-top:4px;background:var(--grad);color:white;border:none;padding:3px 12px;border-radius:5px;font-size:11px;cursor:pointer;font-weight:600">Add as Rule →</button>
+        </div>` : '';
+      const followUp = e.bot_follow_up ? `<div class="ri-bubble-out">→ ${esc(e.bot_follow_up.slice(0,100))}</div>` : '';
+      const actionBadge = e.action && e.action !== 'skip'
+        ? `<span class="badge ${ac(e.action)}" style="font-size:10px">${al(e.action)}</span>` : '';
+
+      return `<div class="ri-row" style="display:block;padding:10px 16px">
+        <div style="display:grid;grid-template-columns:130px 120px 1fr;gap:8px;align-items:start">
+          <div>
+            <div class="ri-name">${esc(e.lead_name || e.contact_id || '?')}</div>
+            <div class="ri-time">${timeStr}</div>
+            ${actionBadge}
+          </div>
+          <div>
+            ${stageStr ? `<div style="font-size:11px;font-weight:600;color:var(--muted)">${esc(stageStr)}</div>` : ''}
+            ${propStr ? `<div style="font-size:10px;color:var(--faint)" title="${esc(propStr)}">${esc(propStr.slice(0,30))}${propStr.length>30?'…':''}</div>` : ''}
+          </div>
+          <div class="ri-msgs">
+            ${leadMsg}${botMsgHtml}${followUp}
+            ${!leadMsg && !e.bot_message ? `<div style="color:var(--faint);font-size:11px">${esc(e.status||'')}</div>` : ''}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+function riToggleFeedback(riId) {
+  const el = document.getElementById(riId + '-fb');
+  if (el) { el.style.display = el.style.display === 'none' ? 'block' : 'none'; if (el.style.display !== 'none') el.querySelector('textarea')?.focus(); }
+}
+
+async function riSubmitFeedback(riId, encodedMsg, encodedBot) {
+  const el = document.getElementById(riId + '-fb');
+  const ta = el?.querySelector('textarea');
+  const feedback = ta?.value?.trim();
+  if (!feedback) return;
+  await fetch('/api/bot-feedback', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({inbound: decodeURIComponent(encodedMsg), bot_message: decodeURIComponent(encodedBot), feedback, rating:'bad'})
+  });
+  el.innerHTML = '<div style="color:var(--green);font-size:11px;font-weight:600">✅ Rule added!</div>';
+}
+
+// ── Conversation Review Modal ──────────────────────────────────────────────
+let _reviewLead = null;
+let _reviewMsgs = [];
+
+async function openConvReview(leadId) {
+  _reviewLead = leads.find(l => l.id === leadId);
+  if (!_reviewLead) return;
+  const modal = document.getElementById('convReviewModal');
+  document.getElementById('convReviewTitle').textContent = `${_reviewLead.name} — Loading…`;
+  document.getElementById('convReviewMessages').innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted);font-size:13px">Loading messages…</div>';
+  modal.style.display = 'flex';
+
+  const res = await fetch(`/api/lead-messages/${_reviewLead.contact_id}`);
+  const data = await res.json();
+  const msgs = data.messages || [];
+  _reviewMsgs = msgs;
+
+  document.getElementById('convReviewTitle').textContent = `${_reviewLead.name} — Last ${msgs.length} messages`;
+  const list = document.getElementById('convReviewMessages');
+  if (!msgs.length) {
+    list.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted);font-size:13px">No messages found.</div>';
+    return;
+  }
+  // msgs is newest-first from GHL; display oldest-first
+  list.innerHTML = msgs.slice().reverse().map((m, i) => {
+    const origIdx = msgs.length - 1 - i;
+    const isBot = m.direction === 'outbound' && m.source === 'bot';
+    const isHuman = m.direction === 'outbound' && m.source !== 'bot';
+    const isInbound = m.direction === 'inbound';
+    const bg = isInbound ? '#F0FDF4' : isBot ? '#EFF6FF' : '#FEF9C3';
+    const border = isInbound ? '#10B981' : isBot ? '#3B82F6' : '#F59E0B';
+    const label = isInbound ? '🙋 Lead' : isBot ? '🤖 Bot' : '👤 Team';
+    return `<div style="background:${bg};border-left:3px solid ${border};border-radius:6px;padding:10px 12px;font-size:12px">
+      <div style="font-size:10px;color:#6B7280;margin-bottom:4px;display:flex;justify-content:space-between">
+        <span>${label}</span><span>${m.date?.slice(0,10)||''}</span>
+      </div>
+      <div style="color:#111;line-height:1.4">${esc(m.body)}</div>
+      ${isBot ? `<div style="margin-top:8px">
+        <button onclick="reviewMsg(${origIdx},'good')" style="background:#D1FAE5;color:#065F46;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">👍</button>
+        <button onclick="reviewMsg(${origIdx},'bad')" style="background:#FEE2E2;color:#991B1B;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600;margin-left:6px">❌ Fix</button>
+        <span id="rv-status-${origIdx}" style="font-size:10px;color:var(--muted);margin-left:8px"></span>
+        <div id="rv-fix-${origIdx}" style="display:none;margin-top:6px">
+          <textarea id="rv-input-${origIdx}" placeholder="What should the bot have done differently?" style="width:100%;height:55px;border:1px solid #E2DDF0;border-radius:5px;padding:6px;font-size:11px;resize:none;outline:none"></textarea>
+          <button onclick="submitConvReview(${origIdx})" style="margin-top:4px;background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">Add as Rule</button>
+        </div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function closeConvReview() {
+  document.getElementById('convReviewModal').style.display = 'none';
+  _reviewLead = null;
+}
+
+function reviewMsg(idx, rating) {
+  if (rating === 'good') {
+    document.getElementById(`rv-status-${idx}`).textContent = '✅ Noted';
+    document.getElementById(`rv-fix-${idx}`).style.display = 'none';
+  } else {
+    document.getElementById(`rv-fix-${idx}`).style.display = 'block';
+    document.getElementById(`rv-input-${idx}`).focus();
+  }
+}
+
+async function submitConvReview(idx) {
+  if (!_reviewLead) return;
+  const msgs = _reviewMsgs;
+  const msg = msgs[idx];
+  // find the inbound message just before this bot message (next item, since array is newest-first)
+  const prevInbound = msgs.slice(idx + 1).find(m => m.direction === 'inbound');
+  const feedback = document.getElementById(`rv-input-${idx}`)?.value?.trim();
+  if (!feedback) return;
+  await fetch('/api/bot-feedback', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      inbound: prevInbound?.body || '',
+      bot_message: msg.body,
+      feedback, rating: 'bad'
+    })
+  });
+  document.getElementById(`rv-status-${idx}`).textContent = '✅ Rule added!';
+  document.getElementById(`rv-fix-${idx}`).innerHTML = '';
+}
 </script>
+
+<div id="convReviewModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:2000;align-items:center;justify-content:center" onclick="if(event.target===this)closeConvReview()">
+  <div style="background:white;border-radius:14px;width:520px;max-width:95vw;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="background:linear-gradient(135deg,#7B2FBE,#4C6EF5);padding:14px 18px;display:flex;justify-content:space-between;align-items:center">
+      <span id="convReviewTitle" style="color:white;font-weight:700;font-size:15px"></span>
+      <button onclick="closeConvReview()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:26px;height:26px;border-radius:50%;cursor:pointer;font-size:15px;line-height:1">✕</button>
+    </div>
+    <div id="convReviewMessages" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px"></div>
+  </div>
+</div>
 </body>
 </html>"""
 
@@ -1606,4 +2252,5 @@ if __name__ == "__main__":
     print("\n  TPMD Lease Agent Dashboard")
     print("  ==========================")
     print("  http://localhost:8000\n")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
