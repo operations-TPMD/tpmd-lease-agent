@@ -148,6 +148,11 @@ def _build_reschedule_url(contact: dict, property_address: str = "") -> str:
     return f"https://tpmd.io/go?c={contact_id}&t=book"
 
 
+def _build_access_code_url(contact_id: str) -> str:
+    """Build access code generation link — triggers workflow to create code for showing."""
+    return f"https://tpmd.io/verifying-access?contact_id={contact_id}"
+
+
 async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
     """Pull contact details and recent messages for an opportunity."""
     contact_id = opp["contactId"]
@@ -249,6 +254,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "current_time": now.isoformat(),
         "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
         "reschedule_url": _build_reschedule_url(contact, custom.get("property_address", "")),
+        "access_code_url": _build_access_code_url(contact_id),
     }
 
 
@@ -363,6 +369,7 @@ STAGE MOVEMENT — always use send_sms_and_update_stage when moving:
 LINKS:
 - Schedule Showing: use "Schedule Showing Link" field
 - Reschedule: use "Reschedule Link" field
+- Access Code (when lead is at door): use "access_code_url" field — this triggers the workflow to generate the unique code
 - Application: {{ contact.application_link }}
 
 RESPOND WITH EXACTLY THIS JSON:
