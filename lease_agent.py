@@ -332,8 +332,8 @@ RULES:
 9. Days Since Showing = N/A → showing hasn't happened OR ended less than 1 hour ago. NEVER ask "how was the showing?" until at least 1 hour has passed since the showing time.
 10. Lead responded today → no proactive follow-up. Respond only if they asked something.
 11. Honor what the lead said (rescheduled, confirmed, never went). Don't contradict them.
-12. If the last outbound message was sent by a human (not the bot) within the last 20 minutes → action must be "skip". Do not send anything while a human agent may be actively handling the lead.
-13. If Last Human Reply Minutes Ago < 20 → skip, regardless of any other logic.
+12. If the last outbound message was sent by a HUMAN (not the bot) within the last 20 minutes → action must be "skip". Do not send anything while a human agent may be actively handling the lead. Check "Last Outbound Message" field.
+13. Human handling window: If Last Outbound Message is "human" AND Minutes Ago < 20 → skip, regardless of any other logic.
 14. Max 3 post-showing follow-up attempts. After 3 with no reply → skip forever.
 15. EMERGENCY — LOCKBOX/ACCESS FAILURE: If the lead says the code or lockbox is not working AND the bot already tried the same code/answer once before in this conversation → action must be "escalate_to_team". Do NOT repeat the same code again. The team will be alerted by SMS.
 16. If the lead reports the same problem 2+ times with no resolution → action must be "escalate_to_team".
@@ -457,15 +457,20 @@ def _build_user_prompt(lead_context: dict) -> str:
     # Check if last inbound was today (lead already responded today)
     last_inbound_today = last_inbound_date == current_date_et if last_inbound_date else False
 
-    # Detect last human (non-bot) outbound message and how many minutes ago
-    last_human_reply_minutes_ago = None
+    # Detect last outbound message (bot or human) and how many minutes ago
+    last_outbound_minutes_ago = None
+    last_outbound_source = None
     now_dt = datetime.fromisoformat(lead_context['current_time'].replace('Z', '+00:00'))
     for msg in lead_context.get("recent_messages", []):
-        if msg["direction"] == "outbound" and msg.get("source", "bot") not in ("bot", "automated", "workflow"):
+        if msg["direction"] == "outbound":
+            source = msg.get("source", "")
+            # source: "" or missing = human, "bot"/"workflow"/"automated" = bot
+            is_human = source not in ("bot", "automated", "workflow")
             try:
                 msg_dt = datetime.fromisoformat(msg["date"].replace('Z', '+00:00'))
                 diff_minutes = (now_dt - msg_dt).total_seconds() / 60
-                last_human_reply_minutes_ago = round(diff_minutes)
+                last_outbound_minutes_ago = round(diff_minutes)
+                last_outbound_source = "human" if is_human else "bot"
             except Exception:
                 pass
             break
@@ -496,7 +501,7 @@ Days Since Showing: {days_since_showing if days_since_showing is not None else '
 Hours Since Showing: {hours_since_showing if hours_since_showing is not None else 'N/A'}
 Post-Showing Outbound Messages Sent: {post_showing_outbound_count}
 Lead Responded Today: {last_inbound_today}
-Last Human Reply Minutes Ago: {last_human_reply_minutes_ago if last_human_reply_minutes_ago is not None else 'N/A'}
+Last Outbound Message: {last_outbound_source} ({last_outbound_minutes_ago} min ago if last_outbound_minutes_ago is not None else 'N/A')
 Application URL: {lead_context['application_url'] if lead_context['application_url'] else 'Not available'}
 Schedule Showing Link: {lead_context['id_verification_url']}
 Reschedule Link: {lead_context['reschedule_url']}
