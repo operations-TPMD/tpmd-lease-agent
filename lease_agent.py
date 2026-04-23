@@ -148,8 +148,21 @@ def _build_reschedule_url(contact: dict, property_address: str = "") -> str:
     return f"https://tpmd.io/go?c={contact_id}&t=book"
 
 
-def _build_access_code_url(contact_id: str) -> str:
-    """Build access code generation link — triggers workflow to create code for showing."""
+SEND_CODE_TRIGGER_LINK_ID = "5iDHWuijJ9VVYBx02kY2"
+
+async def _get_trigger_link_url(client, contact_id: str) -> str:
+    """Resolve GHL trigger link to actual URL for a specific contact."""
+    try:
+        resp = await client.post(
+            f"{GHL_API_BASE}/marketing/trigger-links/{SEND_CODE_TRIGGER_LINK_ID}/url",
+            headers=ghl_headers(),
+            json={"contactId": contact_id, "locationId": GHL_LOCATION_ID},
+        )
+        if resp.status_code in (200, 201):
+            return resp.json().get("url", "")
+    except Exception:
+        pass
+    # Fallback: direct URL
     return f"https://tpmd.io/verifying-access?contact_id={contact_id}"
 
 
@@ -254,7 +267,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "current_time": now.isoformat(),
         "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
         "reschedule_url": _build_reschedule_url(contact, custom.get("property_address", "")),
-        "access_code_url": _build_access_code_url(contact_id),
+        "access_code_url": await _get_trigger_link_url(client, contact_id),
     }
 
 
