@@ -20,6 +20,7 @@ import httpx
 from lease_agent import (
     get_all_opportunities, enrich_lead, ask_claude,
     send_sms, update_stage, create_appointment, send_team_alert,
+    add_contact_tag,
     get_unavailable_properties, _is_property_unavailable,
     STAGE_MAP, STAGE_NAME_TO_ID,
     GHL_API_KEY, GHL_LOCATION_ID, OPENAI_API_KEY,
@@ -122,6 +123,10 @@ async def periodic_scan(dry_run: bool = False) -> dict:
                         await send_sms(client, lead["contact_id"], msg)
                         await send_team_alert(client, lead, reason)
                         detail["escalated"] = True
+
+                    if action == "trigger_voice_bot":
+                        await add_contact_tag(client, lead["contact_id"], "call_for_showing")
+                        detail["voice_bot_triggered"] = True
 
                 summary["actions"] += 1
                 summary["details"].append(detail)
@@ -232,6 +237,10 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
                     await send_sms(client, contact_id, msg)
                     await send_team_alert(client, lead, reason)
                     result["escalated"] = True
+
+                if action == "trigger_voice_bot":
+                    await add_contact_tag(client, contact_id, "call_for_showing")
+                    result["voice_bot_triggered"] = True
 
             return result
 
