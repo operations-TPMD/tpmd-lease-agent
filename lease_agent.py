@@ -402,18 +402,19 @@ RULES:
     Step 2: If the backup code was already sent and still doesn't work, OR no backup code exists, OR the lead reports failure a second time → action must be "escalate_to_team". Do NOT repeat any code that has already failed.
 16. If the lead reports the same problem 2+ times with no resolution → action must be "escalate_to_team".
 17. AI Summary: If "AI Summary" is provided and the lead has responded but has no showing scheduled → read the summary, address the specific concern or objection raised in it. Don't ignore the summary.
-18. Voice bot calls (Verification Auto-Sent): ONLY use action "trigger_voice_bot" for leads in "Verification Auto-Sent" stage when ALL are true:
+18. Voice bot calls (Verification Auto-Sent, ID Verified, ID Rejected): ONLY use action "trigger_voice_bot" for leads in these stages when ALL are true:
     - No showing_date scheduled yet
     - Last inbound message is 2+ days old (or no inbound at all, only outbound from bot)
     - Lead is not in DND
     - Do NOT call more than once per day for the same lead (check if tag "call_for_showing" was already added today)
+    - For ID Rejected leads, naturally bring up ID resubmission during the call conversation if needed
 19. ID reminder after voice bot scheduling: If stage is "Showing Scheduled" AND id_status is "pending" or empty AND no message about ID/verification has been sent recently → send a gentle reminder that they need to complete verification to receive the property access code.
 
 {custom_rules}
 
 STAGE ACTIONS:
 - New Lead / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing.
-- Verification Auto-Sent → if no showing_date AND last inbound is 2+ days ago (or never) AND not DND → action must be "trigger_voice_bot". Otherwise send SMS.
+- Verification Auto-Sent / ID Verified / ID Rejected → if no showing_date AND last inbound is 2+ days ago (or never) AND not DND → action must be "trigger_voice_bot". Otherwise send SMS.
 - Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip. If id_status is pending/empty → add ID reminder.
 - After Showing (Days Since Showing >= 0):
   * 0 attempts: "How was the showing?" warm, no application link yet
