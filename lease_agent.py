@@ -402,13 +402,18 @@ RULES:
     Step 2: If the backup code was already sent and still doesn't work, OR no backup code exists, OR the lead reports failure a second time → action must be "escalate_to_team". Do NOT repeat any code that has already failed.
 16. If the lead reports the same problem 2+ times with no resolution → action must be "escalate_to_team".
 17. AI Summary: If "AI Summary" is provided and the lead has responded but has no showing scheduled → read the summary, address the specific concern or objection raised in it. Don't ignore the summary.
-18. Voice bot calls (Verification Auto-Sent): Leads in "Verification Auto-Sent" with no showing_date and no showing scheduled may be called by the voice bot up to 2 times per day. Use action "trigger_voice_bot" for these leads when they haven't responded to SMS or when a call would move things forward. Do NOT trigger if the lead is in DND or if the tag "call_for_showing" was already added today twice.
+18. Voice bot calls (Verification Auto-Sent): ONLY use action "trigger_voice_bot" for leads in "Verification Auto-Sent" stage when ALL are true:
+    - No showing_date scheduled yet
+    - Last inbound message is 2+ days old (or no inbound at all, only outbound from bot)
+    - Lead is not in DND
+    - Do NOT call more than once per day for the same lead (check if tag "call_for_showing" was already added today)
 19. ID reminder after voice bot scheduling: If stage is "Showing Scheduled" AND id_status is "pending" or empty AND no message about ID/verification has been sent recently → send a gentle reminder that they need to complete verification to receive the property access code.
 
 {custom_rules}
 
 STAGE ACTIONS:
-- New Lead / Verification Auto-Sent / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing. Also consider trigger_voice_bot for Verification Auto-Sent leads.
+- New Lead / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing.
+- Verification Auto-Sent → if no showing_date AND last inbound is 2+ days ago (or never) AND not DND → action must be "trigger_voice_bot". Otherwise send SMS.
 - Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip. If id_status is pending/empty → add ID reminder.
 - After Showing (Days Since Showing >= 0):
   * 0 attempts: "How was the showing?" warm, no application link yet
@@ -525,6 +530,17 @@ def _build_user_prompt(lead_context: dict) -> str:
     # Check if last inbound was today (lead already responded today)
     last_inbound_today = last_inbound_date == current_date_et if last_inbound_date else False
 
+    # Calculate days since last inbound message
+    days_since_inbound = None
+    if last_inbound_date:
+        try:
+            from datetime import date as date_class
+            last_inbound_d = date_class.fromisoformat(last_inbound_date)
+            today_d = date_class.fromisoformat(current_date_et)
+            days_since_inbound = (today_d - last_inbound_d).days
+        except:
+            pass
+
     # Detect last outbound message (bot or human) and how many minutes ago
     last_outbound_minutes_ago = None
     last_outbound_source = None
@@ -583,6 +599,7 @@ Hours Since Creation: {hours_since_creation:.1f}h
 Last Stage Change: {lead_context['last_stage_change'][:10]}
 Last Outbound SMS: {last_outbound_date or 'Never'}
 Last Inbound Message: {f"{last_inbound_date}: {last_inbound_body}" if last_inbound_date else 'None'}
+Days Since Last Inbound (or Creation if Never): {days_since_inbound if days_since_inbound is not None else 'N/A'}
 Outbound SMS Sent Today: {outbound_today_count}
 Current Date (ET): {current_date_et}
 
