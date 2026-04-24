@@ -191,7 +191,7 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
 
     messages = []
     for conv in convos.get("conversations", []):
-        msg_data = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 10})
+        msg_data = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 30})
         for m in msg_data.get("messages", {}).get("messages", []):
             if m.get("messageType") in ("TYPE_SMS", "TYPE_EMAIL"):
                 messages.append({
@@ -270,8 +270,11 @@ async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
         "property_full_listing": custom.get("property_full_listing", ""),
         "property_headline": custom.get("property_headline", ""),
         "ai_summary": custom.get("ai_summary", ""),
-        "recent_messages": messages[:6],
+        "recent_messages": messages[:20],
         "current_time": now.isoformat(),
+        "last_outbound_date": next(
+            (m["date"][:10] for m in messages[:20] if m["direction"] == "outbound"), ""
+        ),
         "id_verification_url": _build_id_url(contact, custom.get("property_address", "")),
         "reschedule_url": _build_reschedule_url(contact, custom.get("property_address", "")),
         "access_code_url": await _get_trigger_link_url(client, contact_id),
@@ -488,6 +491,14 @@ def _build_user_prompt(lead_context: dict) -> str:
         if msg["direction"] == "outbound" and msg["date"][:10] == current_date_et
     )
 
+    # Count consecutive unanswered outbound (newest first) — hard enforce Rule 3
+    consecutive_unanswered = 0
+    for msg in lead_context.get("recent_messages", []):
+        if msg["direction"] == "outbound":
+            consecutive_unanswered += 1
+        elif msg["direction"] == "inbound":
+            break  # inbound message breaks the streak
+
     # Calculate days/hours since/until showing
     showing_date_str = lead_context.get("showing_date", "")
     showing_time_str = lead_context.get("showing_time", "")  # HH:MM if available
@@ -605,6 +616,7 @@ Last Outbound SMS: {last_outbound_date or 'Never'}
 Last Inbound Message: {f"{last_inbound_date}: {last_inbound_body}" if last_inbound_date else 'None'}
 Days Since Last Inbound (or Creation if Never): {days_since_inbound if days_since_inbound is not None else 'N/A'}
 Outbound SMS Sent Today: {outbound_today_count}
+Consecutive Unanswered Outbound (in a row, no reply): {consecutive_unanswered}
 Current Date (ET): {current_date_et}
 
 PROPERTY DETAILS (use this to answer any questions about rent, utilities, pets, fees, availability, etc.):
@@ -883,6 +895,23 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
         except Exception as e:
             return f"  ❌ ERROR closing unavailable lead {name}: {e}"
         return f"  🚫 {name}: property unavailable → notified + moved to Lost"
+
+    # Hard enforce Rule 3: 3+ consecutive unanswered outbound → skip (wait 2 days)
+    consecutive = 0
+    for msg in lead.get("recent_messages", []):
+        if msg["direction"] == "outbound":
+            consecutive += 1
+        elif msg["direction"] == "inbound":
+            break
+    if consecutive >= 3:
+        last_out = lead.get("last_outbound_date", "")
+        try:
+            from datetime import date as _date
+            days_since_last = (_date.fromisoformat(lead['current_time'][:10]) - _date.fromisoformat(last_out)).days if last_out else 99
+        except:
+            days_since_last = 99
+        if days_since_last < 2:
+            return f"  ⏭ SKIP {lead['name']} ({consecutive} unanswered outbound, last sent {days_since_last}d ago — waiting 2 days)"
 
     try:
         decision = await ask_claude(client, lead)
