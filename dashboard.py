@@ -537,6 +537,7 @@ async def api_test_chat(request: Request):
             "property_summary": property_summary,
             "property_full_listing": property_summary,
             "property_headline": "",
+            "ai_summary": "",
             "recent_messages": recent_messages[:6],
             "current_time": now_iso,
             "id_verification_url": "https://example.com/schedule",

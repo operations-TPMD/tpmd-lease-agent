@@ -407,6 +407,9 @@ RULES:
     - Last inbound message is 2+ days old (or no inbound at all, only outbound from bot)
     - Lead is not in DND
     - Do NOT call more than once per day for the same lead (check if tag "call_for_showing" was already added today)
+    - AI Summary does NOT indicate the lead is not interested, not looking, or asked not to be contacted (if summary says "not interested", "no longer looking", "do not call", "wrong number", "stop" → skip or move to Lost instead)
+    - If AI Summary says "voicemail", "no answer", "left message" → still eligible to call again
+    - If AI Summary says "interested", "wants to schedule", "asked question" → send SMS to follow up instead of calling again
     - For ID Rejected leads, naturally bring up ID resubmission during the call conversation if needed
 19. ID reminder after voice bot scheduling: If stage is "Showing Scheduled" AND id_status is "pending" or empty AND no message about ID/verification has been sent recently → send a gentle reminder that they need to complete verification to receive the property access code.
 
@@ -414,7 +417,7 @@ RULES:
 
 STAGE ACTIONS:
 - New Lead / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing.
-- Verification Auto-Sent / ID Verified / ID Rejected → if no showing_date AND last inbound is 2+ days ago (or never) AND not DND → action must be "trigger_voice_bot". Otherwise send SMS.
+- Verification Auto-Sent / ID Verified / ID Rejected → if no showing_date AND last inbound is 2+ days ago (or never) AND not DND AND AI Summary doesn't show disinterest → action must be "trigger_voice_bot". If AI Summary shows interest/question → send SMS. If AI Summary shows not interested → skip or Lost.
 - Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip. If id_status is pending/empty → add ID reminder.
 - After Showing (Days Since Showing >= 0):
   * 0 attempts: "How was the showing?" warm, no application link yet
