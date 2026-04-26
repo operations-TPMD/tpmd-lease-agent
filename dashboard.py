@@ -849,6 +849,107 @@ async def api_bot_feedback(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/api/vapi-webhook")
+async def api_vapi_webhook(request: Request):
+    """Receive VAPI end-of-call report and write AI Summary to GHL + call_log.json."""
+    import json as _json
+    from lease_agent import CALL_LOG_FILE, parse_custom_fields, ghl_post, ghl_get, CUSTOM_FIELDS
+    try:
+        body = await request.json()
+        msg_type = body.get("type", "")
+        if msg_type not in ("end-of-call-report", "call.ended"):
+            return JSONResponse({"status": "ignored", "type": msg_type})
+
+        summary = body.get("summary", "") or body.get("call", {}).get("summary", "")
+        customer_phone = (
+            body.get("customer", {}).get("number", "") or
+            body.get("call", {}).get("customer", {}).get("number", "")
+        )
+        call_started_at = body.get("startedAt", "") or body.get("call", {}).get("startedAt", "")
+
+        if not customer_phone:
+            return JSONResponse({"status": "no_phone"})
+
+        # Normalize phone: ensure +1 prefix
+        phone = customer_phone.strip()
+        if not phone.startswith("+"):
+            phone = "+" + phone
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            # Find contact by phone
+            search = await ghl_get(client, "/contacts/search/duplicate", {
+                "locationId": GHL_LOCATION_ID, "phone": phone
+            })
+            contact = search.get("contact", None)
+            if not contact:
+                # fallback: search by query
+                contacts_resp = await ghl_get(client, "/contacts/", {
+                    "locationId": GHL_LOCATION_ID, "query": phone, "limit": 1
+                })
+                contacts = contacts_resp.get("contacts", [])
+                contact = contacts[0] if contacts else None
+
+            if not contact:
+                logger.warning(f"VAPI webhook: no contact found for {phone}")
+                return JSONResponse({"status": "contact_not_found", "phone": phone})
+
+            contact_id = contact.get("id", "")
+            name = contact.get("name", "")
+
+            # Find AI Summary field ID
+            ai_summary_field_id = None
+            for fid, fname in CUSTOM_FIELDS.items():
+                if fname == "ai_summary":
+                    ai_summary_field_id = fid
+                    break
+            # Also try to detect from existing custom fields
+            if not ai_summary_field_id:
+                for cf in contact.get("customFields", []):
+                    fkey = (cf.get("fieldKey") or cf.get("name") or "").lower().replace(" ", "_")
+                    if "ai_summary" in fkey:
+                        ai_summary_field_id = cf.get("id", "")
+                        break
+
+            if summary and ai_summary_field_id:
+                await ghl_post(client, f"/contacts/{contact_id}", {
+                    "customFields": [{"id": ai_summary_field_id, "field_value": summary}]
+                })
+
+            # Update call_log.json entry for this contact
+            try:
+                with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
+                    entries = _json.load(f)
+            except (FileNotFoundError, ValueError):
+                entries = []
+
+            # Update existing entry or append
+            found = False
+            for e in entries:
+                if e.get("contact_id") == contact_id:
+                    e["ai_summary"] = summary
+                    e["call_ended_at"] = call_started_at
+                    found = True
+                    break
+            if not found:
+                entries.append({
+                    "contact_id": contact_id,
+                    "name": name,
+                    "stage": "",
+                    "triggered_at": call_started_at or datetime.now(timezone.utc).isoformat(),
+                    "ai_summary": summary,
+                })
+
+            with open(CALL_LOG_FILE, "w", encoding="utf-8") as f:
+                _json.dump(entries, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"VAPI webhook: saved summary for {name} ({contact_id})")
+            return JSONResponse({"status": "ok", "contact_id": contact_id, "name": name})
+
+    except Exception as e:
+        logger.error(f"VAPI webhook error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/call-log")
 async def api_call_log():
     """Return call log from local file + live AI Summary from GHL."""
