@@ -849,6 +849,86 @@ async def api_bot_feedback(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/call-log")
+async def api_call_log():
+    """Return log of all voice bot calls with date and AI Summary result."""
+    from datetime import datetime as dt
+    entries = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        opps = await get_all_opportunities(client)
+        for opp in opps:
+            contact = opp.get("contact", {})
+            tags = contact.get("tags", [])
+            if "call_for_showing" not in tags:
+                continue
+
+            contact_id = opp.get("contactId", "")
+            name = contact.get("name", contact_id)
+            stage_id = opp.get("pipelineStageId", "")
+            stage = STAGE_MAP.get(stage_id, "Unknown")
+
+            # Get AI Summary from contact custom fields
+            ai_summary = ""
+            try:
+                contact_data = await ghl_get(client, f"/contacts/{contact_id}")
+                custom_fields = contact_data.get("contact", {}).get("customFields", [])
+                parsed = parse_custom_fields(custom_fields)
+                ai_summary = parsed.get("ai_summary", "")
+            except Exception:
+                pass
+
+            # Find call events in conversation
+            call_date = ""
+            call_duration = ""
+            try:
+                convos = await ghl_get(client, "/conversations/search", {
+                    "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
+                })
+                for conv in convos.get("conversations", []):
+                    msgs_resp = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 50})
+                    all_msgs = msgs_resp.get("messages", {}).get("messages", [])
+                    for m in all_msgs:
+                        msg_type = m.get("messageType", "")
+                        body = m.get("body", "")
+                        if msg_type == "TYPE_CALL" or "call" in msg_type.lower() or "Call completed" in body:
+                            call_date = m.get("dateAdded", "")[:10]
+                            call_duration = m.get("meta", {}).get("duration", "") if isinstance(m.get("meta"), dict) else ""
+                            break
+            except Exception:
+                pass
+
+            # Determine result label from AI Summary
+            if not ai_summary:
+                result_label = "No answer / No summary"
+                result_color = "#94a3b8"
+            else:
+                summary_lower = ai_summary.lower()
+                if any(w in summary_lower for w in ["voicemail", "no answer", "did not answer", "not answer", "left message"]):
+                    result_label = "Voicemail / No answer"
+                    result_color = "#f59e0b"
+                elif any(w in summary_lower for w in ["not interested", "not looking", "no longer", "do not call", "stop", "wrong number"]):
+                    result_label = "Not interested"
+                    result_color = "#ef4444"
+                elif any(w in summary_lower for w in ["interested", "wants to", "schedule", "showing", "yes", "would like"]):
+                    result_label = "Interested"
+                    result_color = "#22c55e"
+                else:
+                    result_label = "Spoke — see summary"
+                    result_color = "#4C6EF5"
+
+            entries.append({
+                "name": name,
+                "stage": stage,
+                "call_date": call_date,
+                "ai_summary": ai_summary,
+                "result_label": result_label,
+                "result_color": result_color,
+            })
+
+    entries.sort(key=lambda x: x["call_date"], reverse=True)
+    return JSONResponse({"calls": entries, "total": len(entries)})
+
+
 # ── Dashboard HTML ───────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -1327,6 +1407,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="ri-body" id="riBody">
     <div class="ri-no-data">No interactions yet. The bot will appear here when it handles inbound messages.</div>
+  </div>
+</div>
+
+<!-- Call Log Panel -->
+<div class="ri-section" id="callLogSection" style="margin-top:12px">
+  <div class="ri-header" onclick="toggleCallLog()" id="callLogHeader">
+    <span class="stage-toggle" id="callLogToggle">▶</span>
+    <span style="font-weight:600;font-size:13px;color:var(--text)">📞 Call Log</span>
+    <span class="stage-count" id="callLogCount" style="background:#7B2FBE">0</span>
+    <span style="font-size:11px;color:var(--faint);margin-left:auto">Voice bot calls — date & AI Summary result</span>
+    <button onclick="event.stopPropagation();loadCallLog()" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:5px;font-size:11px;cursor:pointer;margin-left:8px">↻ Refresh</button>
+  </div>
+  <div id="callLogBody" style="display:none;overflow-x:auto">
+    <div id="callLogLoading" style="text-align:center;padding:20px;color:#94a3b8;font-size:13px">Loading…</div>
+    <table id="callLogTable" style="display:none;width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="background:#f8f7fc;border-bottom:2px solid var(--border)">
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Name</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Stage</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Call Date</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Result</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">AI Summary</th>
+        </tr>
+      </thead>
+      <tbody id="callLogRows"></tbody>
+    </table>
+    <div id="callLogEmpty" style="display:none;text-align:center;padding:20px;color:#94a3b8;font-size:13px">No calls found. Voice bot calls will appear here.</div>
   </div>
 </div>
 
@@ -2123,6 +2230,51 @@ async function loadRI() {
       </div>`;
     }).join('');
   } catch(e) {}
+}
+
+let callLogCollapsed = true;
+
+function toggleCallLog() {
+  callLogCollapsed = !callLogCollapsed;
+  document.getElementById('callLogBody').style.display = callLogCollapsed ? 'none' : 'block';
+  document.getElementById('callLogToggle').textContent = callLogCollapsed ? '▶' : '▼';
+  if (!callLogCollapsed) loadCallLog();
+}
+
+async function loadCallLog() {
+  const loading = document.getElementById('callLogLoading');
+  const table = document.getElementById('callLogTable');
+  const empty = document.getElementById('callLogEmpty');
+  const rows = document.getElementById('callLogRows');
+  const cnt = document.getElementById('callLogCount');
+
+  loading.style.display = 'block';
+  table.style.display = 'none';
+  empty.style.display = 'none';
+
+  try {
+    const r = await fetch('/api/call-log');
+    const d = await r.json();
+    const calls = d.calls || [];
+    cnt.textContent = calls.length;
+    loading.style.display = 'none';
+
+    if (!calls.length) { empty.style.display = 'block'; return; }
+
+    rows.innerHTML = calls.map(c => `
+      <tr style="border-bottom:1px solid var(--border);transition:background 0.15s" onmouseover="this.style.background='#f8f7fc'" onmouseout="this.style.background=''">
+        <td style="padding:10px 14px;font-weight:600;color:var(--text)">${esc(c.name)}</td>
+        <td style="padding:10px 14px;color:var(--muted);font-size:11px">${esc(c.stage)}</td>
+        <td style="padding:10px 14px;color:var(--muted);font-size:12px">${c.call_date || '—'}</td>
+        <td style="padding:10px 14px">
+          <span style="background:${c.result_color}22;color:${c.result_color};border:1px solid ${c.result_color}44;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;white-space:nowrap">${esc(c.result_label)}</span>
+        </td>
+        <td style="padding:10px 14px;color:var(--muted);font-size:12px;max-width:320px">${c.ai_summary ? `<span title="${esc(c.ai_summary)}">${esc(c.ai_summary.slice(0,120))}${c.ai_summary.length>120?'…':''}</span>` : '<span style="color:var(--faint)">—</span>'}</td>
+      </tr>`).join('');
+    table.style.display = 'table';
+  } catch(e) {
+    loading.textContent = 'Error loading call log.';
+  }
 }
 
 function riToggleFeedback(riId) {
