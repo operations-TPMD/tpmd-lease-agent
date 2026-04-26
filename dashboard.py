@@ -851,44 +851,27 @@ async def api_bot_feedback(request: Request):
 
 @app.get("/api/call-log")
 async def api_call_log():
-    """Return log of all voice bot calls based on call events in conversation history."""
+    """Return call log from local file + live AI Summary from GHL."""
+    import json as _json
+    from lease_agent import CALL_LOG_FILE, parse_custom_fields, ghl_get
+
+    try:
+        with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
+            raw_entries = _json.load(f)
+    except (FileNotFoundError, ValueError):
+        raw_entries = []
+
+    # Deduplicate: keep latest trigger per contact
+    seen = {}
+    for e in raw_entries:
+        cid = e.get("contact_id", "")
+        if cid not in seen or e["triggered_at"] > seen[cid]["triggered_at"]:
+            seen[cid] = e
+
     entries = []
-    async with httpx.AsyncClient(timeout=60) as client:
-        opps = await get_all_opportunities(client)
-        for opp in opps:
-            contact_id = opp.get("contactId", "")
-            contact = opp.get("contact", {})
-            name = contact.get("name", contact_id)
-            stage_id = opp.get("pipelineStageId", "")
-            stage = STAGE_MAP.get(stage_id, "Unknown")
-
-            # Scan conversation for call events
-            call_dates = []
-            try:
-                convos = await ghl_get(client, "/conversations/search", {
-                    "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
-                })
-                for conv in convos.get("conversations", []):
-                    msgs_resp = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 50})
-                    all_msgs = msgs_resp.get("messages", {}).get("messages", [])
-                    for m in all_msgs:
-                        msg_type = m.get("messageType", "")
-                        body = m.get("body", "")
-                        is_call = (
-                            "CALL" in msg_type.upper() or
-                            "call" in msg_type.lower() or
-                            "Call completed" in body or
-                            "call completed" in body.lower()
-                        )
-                        if is_call:
-                            call_dates.append(m.get("dateAdded", "")[:10])
-            except Exception:
-                pass
-
-            if not call_dates:
-                continue
-
-            # Get AI Summary
+    async with httpx.AsyncClient(timeout=30) as client:
+        for e in seen.values():
+            contact_id = e.get("contact_id", "")
             ai_summary = ""
             try:
                 contact_data = await ghl_get(client, f"/contacts/{contact_id}")
@@ -898,7 +881,6 @@ async def api_call_log():
             except Exception:
                 pass
 
-            # Determine result label
             if not ai_summary:
                 result_label = "No answer / No summary"
                 result_color = "#94a3b8"
@@ -917,17 +899,17 @@ async def api_call_log():
                     result_label = "Spoke — see summary"
                     result_color = "#4C6EF5"
 
-            for call_date in call_dates:
-                entries.append({
-                    "name": name,
-                    "stage": stage,
-                    "call_date": call_date,
-                    "ai_summary": ai_summary,
-                    "result_label": result_label,
-                    "result_color": result_color,
-                })
+            entries.append({
+                "name": e.get("name", ""),
+                "stage": e.get("stage", ""),
+                "call_date": e.get("triggered_at", "")[:10],
+                "call_time": e.get("triggered_at", "")[11:16],
+                "ai_summary": ai_summary,
+                "result_label": result_label,
+                "result_color": result_color,
+            })
 
-    entries.sort(key=lambda x: x["call_date"], reverse=True)
+    entries.sort(key=lambda x: x.get("call_date", ""), reverse=True)
     return JSONResponse({"calls": entries, "total": len(entries)})
 
 
@@ -1220,6 +1202,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <span class="scan-time" id="scanTime"></span>
+    <button class="btn btn-outline" style="color:#C4B5FD;border-color:rgba(196,181,253,0.5)" onclick="toggleCallLog()">📞 Call Log</button>
     <button class="btn btn-outline" style="color:#A5F3FC;border-color:rgba(165,243,252,0.5)" onclick="toggleTestChat()">🧪 Test Bot</button>
     <button class="btn btn-outline" style="color:white;border-color:rgba(255,255,255,0.4)" onclick="openTrainModal()">🎓 Train Bot</button>
     <button class="btn btn-outline" style="color:#86EFAC;border-color:rgba(134,239,172,0.5)" onclick="openPropertiesModal()">🏠 Properties</button>
@@ -1412,30 +1395,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Call Log Panel -->
-<div class="ri-section" id="callLogSection" style="margin-top:12px">
-  <div class="ri-header" onclick="toggleCallLog()" id="callLogHeader">
-    <span class="stage-toggle" id="callLogToggle">▶</span>
-    <span style="font-weight:600;font-size:13px;color:var(--text)">📞 Call Log</span>
-    <span class="stage-count" id="callLogCount" style="background:#7B2FBE">0</span>
-    <span style="font-size:11px;color:var(--faint);margin-left:auto">Voice bot calls — date & AI Summary result</span>
-    <button onclick="event.stopPropagation();loadCallLog()" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:5px;font-size:11px;cursor:pointer;margin-left:8px">↻ Refresh</button>
+<!-- Call Log floating panel -->
+<div id="callLogPanel" style="display:none;position:fixed;top:0;right:0;bottom:0;width:680px;background:white;border-left:1px solid var(--border);box-shadow:-4px 0 24px rgba(0,0,0,0.1);z-index:300;display:flex;flex-direction:column;transform:translateX(100%);transition:transform 0.3s ease">
+  <div style="background:linear-gradient(135deg,#7B2FBE,#4C6EF5);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="color:white;font-weight:700;font-size:15px">📞 Call Log</span>
+      <span id="callLogCount" style="background:rgba(255,255,255,0.25);color:white;padding:1px 8px;border-radius:12px;font-size:12px;font-weight:600">0</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button onclick="loadCallLog()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer">↻ Refresh</button>
+      <button onclick="toggleCallLog()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:26px;height:26px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+    </div>
   </div>
-  <div id="callLogBody" style="display:none;overflow-x:auto">
-    <div id="callLogLoading" style="text-align:center;padding:20px;color:#94a3b8;font-size:13px">Loading…</div>
+  <div style="flex:1;overflow-y:auto">
+    <div id="callLogLoading" style="text-align:center;padding:30px;color:#94a3b8;font-size:13px">Loading…</div>
     <table id="callLogTable" style="display:none;width:100%;border-collapse:collapse;font-size:12px">
       <thead>
-        <tr style="background:#f8f7fc;border-bottom:2px solid var(--border)">
+        <tr style="background:#f8f7fc;border-bottom:2px solid var(--border);position:sticky;top:0">
           <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Name</th>
           <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Stage</th>
-          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Call Date</th>
-          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Result</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">תאריך שיחה</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">תוצאה</th>
           <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">AI Summary</th>
         </tr>
       </thead>
       <tbody id="callLogRows"></tbody>
     </table>
-    <div id="callLogEmpty" style="display:none;text-align:center;padding:20px;color:#94a3b8;font-size:13px">No calls found. Voice bot calls will appear here.</div>
+    <div id="callLogEmpty" style="display:none;text-align:center;padding:40px;color:#94a3b8;font-size:13px">אין שיחות עדיין. שיחות Voice Bot יופיעו כאן.</div>
   </div>
 </div>
 
@@ -2234,13 +2220,14 @@ async function loadRI() {
   } catch(e) {}
 }
 
-let callLogCollapsed = true;
+let callLogOpen = false;
 
 function toggleCallLog() {
-  callLogCollapsed = !callLogCollapsed;
-  document.getElementById('callLogBody').style.display = callLogCollapsed ? 'none' : 'block';
-  document.getElementById('callLogToggle').textContent = callLogCollapsed ? '▶' : '▼';
-  if (!callLogCollapsed) loadCallLog();
+  callLogOpen = !callLogOpen;
+  const panel = document.getElementById('callLogPanel');
+  panel.style.display = 'flex';
+  panel.style.transform = callLogOpen ? 'translateX(0)' : 'translateX(100%)';
+  if (callLogOpen) loadCallLog();
 }
 
 async function loadCallLog() {
@@ -2267,15 +2254,15 @@ async function loadCallLog() {
       <tr style="border-bottom:1px solid var(--border);transition:background 0.15s" onmouseover="this.style.background='#f8f7fc'" onmouseout="this.style.background=''">
         <td style="padding:10px 14px;font-weight:600;color:var(--text)">${esc(c.name)}</td>
         <td style="padding:10px 14px;color:var(--muted);font-size:11px">${esc(c.stage)}</td>
-        <td style="padding:10px 14px;color:var(--muted);font-size:12px">${c.call_date || '—'}</td>
+        <td style="padding:10px 14px;color:var(--muted);font-size:12px;white-space:nowrap">${c.call_date || '—'}${c.call_time ? ' ' + c.call_time : ''}</td>
         <td style="padding:10px 14px">
           <span style="background:${c.result_color}22;color:${c.result_color};border:1px solid ${c.result_color}44;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;white-space:nowrap">${esc(c.result_label)}</span>
         </td>
-        <td style="padding:10px 14px;color:var(--muted);font-size:12px;max-width:320px">${c.ai_summary ? `<span title="${esc(c.ai_summary)}">${esc(c.ai_summary.slice(0,120))}${c.ai_summary.length>120?'…':''}</span>` : '<span style="color:var(--faint)">—</span>'}</td>
+        <td style="padding:10px 14px;color:var(--muted);font-size:12px">${c.ai_summary ? `<span title="${esc(c.ai_summary)}">${esc(c.ai_summary.slice(0,150))}${c.ai_summary.length>150?'…':''}</span>` : '<span style="color:var(--faint)">—</span>'}</td>
       </tr>`).join('');
     table.style.display = 'table';
   } catch(e) {
-    loading.textContent = 'Error loading call log.';
+    loading.textContent = 'שגיאה בטעינת ה-Call Log.';
   }
 }
 

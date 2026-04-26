@@ -797,6 +797,29 @@ async def add_contact_tag(client: httpx.AsyncClient, contact_id: str, tag: str) 
     })
 
 
+CALL_LOG_FILE = os.path.join(os.path.dirname(__file__), "call_log.json")
+
+def _append_call_log(lead: dict):
+    """Persist a call trigger event to call_log.json."""
+    import json as _json
+    try:
+        try:
+            with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
+                entries = _json.load(f)
+        except (FileNotFoundError, ValueError):
+            entries = []
+        entries.append({
+            "contact_id": lead.get("contact_id", ""),
+            "name": lead.get("name", ""),
+            "stage": lead.get("stage", ""),
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+        })
+        with open(CALL_LOG_FILE, "w", encoding="utf-8") as f:
+            _json.dump(entries, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 async def execute_action(
     client: httpx.AsyncClient, lead: dict, decision: dict, dry_run: bool
 ) -> str:
@@ -856,6 +879,7 @@ async def execute_action(
             log_lines.append(f"  📞 [DRY RUN] Would trigger voice bot for {name}")
         else:
             await add_contact_tag(client, lead["contact_id"], "call_for_showing")
+            _append_call_log(lead)
             log_lines.append(f"  📞 TRIGGERED voice bot for {name} (tag: call_for_showing)")
 
     if not log_lines:
