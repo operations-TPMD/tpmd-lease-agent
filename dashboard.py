@@ -851,35 +851,19 @@ async def api_bot_feedback(request: Request):
 
 @app.get("/api/call-log")
 async def api_call_log():
-    """Return log of all voice bot calls with date and AI Summary result."""
-    from datetime import datetime as dt
+    """Return log of all voice bot calls based on call events in conversation history."""
     entries = []
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         opps = await get_all_opportunities(client)
         for opp in opps:
-            contact = opp.get("contact", {})
-            tags = contact.get("tags", [])
-            if "call_for_showing" not in tags:
-                continue
-
             contact_id = opp.get("contactId", "")
+            contact = opp.get("contact", {})
             name = contact.get("name", contact_id)
             stage_id = opp.get("pipelineStageId", "")
             stage = STAGE_MAP.get(stage_id, "Unknown")
 
-            # Get AI Summary from contact custom fields
-            ai_summary = ""
-            try:
-                contact_data = await ghl_get(client, f"/contacts/{contact_id}")
-                custom_fields = contact_data.get("contact", {}).get("customFields", [])
-                parsed = parse_custom_fields(custom_fields)
-                ai_summary = parsed.get("ai_summary", "")
-            except Exception:
-                pass
-
-            # Find call events in conversation
-            call_date = ""
-            call_duration = ""
+            # Scan conversation for call events
+            call_dates = []
             try:
                 convos = await ghl_get(client, "/conversations/search", {
                     "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
@@ -890,40 +874,58 @@ async def api_call_log():
                     for m in all_msgs:
                         msg_type = m.get("messageType", "")
                         body = m.get("body", "")
-                        if msg_type == "TYPE_CALL" or "call" in msg_type.lower() or "Call completed" in body:
-                            call_date = m.get("dateAdded", "")[:10]
-                            call_duration = m.get("meta", {}).get("duration", "") if isinstance(m.get("meta"), dict) else ""
-                            break
+                        is_call = (
+                            "CALL" in msg_type.upper() or
+                            "call" in msg_type.lower() or
+                            "Call completed" in body or
+                            "call completed" in body.lower()
+                        )
+                        if is_call:
+                            call_dates.append(m.get("dateAdded", "")[:10])
             except Exception:
                 pass
 
-            # Determine result label from AI Summary
+            if not call_dates:
+                continue
+
+            # Get AI Summary
+            ai_summary = ""
+            try:
+                contact_data = await ghl_get(client, f"/contacts/{contact_id}")
+                custom_fields = contact_data.get("contact", {}).get("customFields", [])
+                parsed = parse_custom_fields(custom_fields)
+                ai_summary = parsed.get("ai_summary", "")
+            except Exception:
+                pass
+
+            # Determine result label
             if not ai_summary:
                 result_label = "No answer / No summary"
                 result_color = "#94a3b8"
             else:
-                summary_lower = ai_summary.lower()
-                if any(w in summary_lower for w in ["voicemail", "no answer", "did not answer", "not answer", "left message"]):
+                sl = ai_summary.lower()
+                if any(w in sl for w in ["voicemail", "no answer", "did not answer", "not answer", "left message"]):
                     result_label = "Voicemail / No answer"
                     result_color = "#f59e0b"
-                elif any(w in summary_lower for w in ["not interested", "not looking", "no longer", "do not call", "stop", "wrong number"]):
+                elif any(w in sl for w in ["not interested", "not looking", "no longer", "do not call", "stop", "wrong number"]):
                     result_label = "Not interested"
                     result_color = "#ef4444"
-                elif any(w in summary_lower for w in ["interested", "wants to", "schedule", "showing", "yes", "would like"]):
+                elif any(w in sl for w in ["interested", "wants to", "schedule", "showing", "yes", "would like"]):
                     result_label = "Interested"
                     result_color = "#22c55e"
                 else:
                     result_label = "Spoke — see summary"
                     result_color = "#4C6EF5"
 
-            entries.append({
-                "name": name,
-                "stage": stage,
-                "call_date": call_date,
-                "ai_summary": ai_summary,
-                "result_label": result_label,
-                "result_color": result_color,
-            })
+            for call_date in call_dates:
+                entries.append({
+                    "name": name,
+                    "stage": stage,
+                    "call_date": call_date,
+                    "ai_summary": ai_summary,
+                    "result_label": result_label,
+                    "result_color": result_color,
+                })
 
     entries.sort(key=lambda x: x["call_date"], reverse=True)
     return JSONResponse({"calls": entries, "total": len(entries)})
