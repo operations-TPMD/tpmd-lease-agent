@@ -31,6 +31,11 @@ GHL_LOCATION_ID = os.environ.get("GHL_LOCATION_ID", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # fallback if OpenAI unavailable
 
+VAPI_API_KEY = "e1780850-7e60-400a-aaf4-de6662fa8d54"
+VAPI_PHONE_NUMBER_ID = "0814d623-960d-4fb5-a563-762fe0b63fc1"
+VAPI_ASSISTANT_ID = "530f891a-1438-46a5-9c75-a8df1d6020c6"
+VAPI_BASE = "https://api.vapi.ai"
+
 LEASE_PIPELINE_ID = "DVv60aGSOc7XtIofy4Pn"
 TEAM_ALERT_PHONE = "+19545799165"
 
@@ -878,9 +883,40 @@ async def execute_action(
         if dry_run:
             log_lines.append(f"  📞 [DRY RUN] Would trigger voice bot for {name}")
         else:
-            await add_contact_tag(client, lead["contact_id"], "call_for_showing")
-            _append_call_log(lead)
-            log_lines.append(f"  📞 TRIGGERED voice bot for {name} (tag: call_for_showing)")
+            phone = lead.get("phone", "")
+            if not phone:
+                log_lines.append(f"  ❌ Cannot call {name} — no phone number")
+            else:
+                # Normalize phone to E.164
+                normalized_phone = phone.strip().replace(" ", "").replace("-", "")
+                if not normalized_phone.startswith("+"):
+                    normalized_phone = "+1" + normalized_phone.lstrip("1")
+                try:
+                    vapi_payload = {
+                        "phoneNumberId": VAPI_PHONE_NUMBER_ID,
+                        "assistantId": VAPI_ASSISTANT_ID,
+                        "customer": {"number": normalized_phone},
+                        "assistantOverrides": {
+                            "variableValues": {
+                                "name": lead.get("name", ""),
+                                "first_name": lead.get("name", "").split()[0] if lead.get("name") else "",
+                                "property_address": lead.get("property_address", ""),
+                                "contact_id": lead.get("contact_id", ""),
+                            }
+                        }
+                    }
+                    vapi_resp = await client.post(
+                        f"{VAPI_BASE}/call",
+                        headers={"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"},
+                        json=vapi_payload,
+                        timeout=20,
+                    )
+                    vapi_resp.raise_for_status()
+                    await add_contact_tag(client, lead["contact_id"], "call_for_showing")
+                    _append_call_log(lead)
+                    log_lines.append(f"  📞 TRIGGERED voice bot for {name} via VAPI API (direct)")
+                except Exception as vapi_err:
+                    log_lines.append(f"  ❌ VAPI call failed for {name}: {vapi_err}")
 
     if not log_lines:
         log_lines.append(f"  ❓ Unknown action '{action}' for {name}: {reasoning}")
@@ -942,6 +978,24 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
             days_since_last = 99
         if days_since_last < 2:
             return f"  ⏭ SKIP {lead['name']} ({consecutive} unanswered outbound, last sent {days_since_last}d ago — waiting 2 days)"
+
+    # Hard enforce: if the last 3+ outbound messages (even after inbound replies) all share
+    # the same scheduling link → we've been spamming. Block for 2 days.
+    import re as _re
+    all_outbound = [m for m in lead.get("recent_messages", []) if m["direction"] == "outbound"]
+    if len(all_outbound) >= 3:
+        def _extract_links(body):
+            return set(_re.findall(r'https?://\S+', body or ""))
+        last3_links = [_extract_links(m.get("body", "")) for m in all_outbound[:3]]
+        if last3_links[0] and all(ls == last3_links[0] for ls in last3_links[1:]):
+            last_out = lead.get("last_outbound_date", "")
+            try:
+                from datetime import date as _date
+                days_since_last = (_date.fromisoformat(lead['current_time'][:10]) - _date.fromisoformat(last_out)).days if last_out else 99
+            except:
+                days_since_last = 99
+            if days_since_last < 2:
+                return f"  ⏭ SKIP {lead['name']} (same link repeated 3+ times, last sent {days_since_last}d ago — avoiding spam)"
 
     try:
         decision = await ask_claude(client, lead)
