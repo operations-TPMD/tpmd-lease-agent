@@ -1000,11 +1000,21 @@ async def api_call_log():
                     result_label = "Spoke — see summary"
                     result_color = "#4C6EF5"
 
+            triggered_at = e.get("triggered_at", "")
+            try:
+                eastern = timezone(timedelta(hours=-4))  # EDT (Florida)
+                dt_utc = datetime.fromisoformat(triggered_at.replace("Z", "+00:00"))
+                dt_eastern = dt_utc.astimezone(eastern)
+                call_date = dt_eastern.strftime("%Y-%m-%d")
+                call_time = dt_eastern.strftime("%H:%M")
+            except Exception:
+                call_date = triggered_at[:10]
+                call_time = triggered_at[11:16]
             entries.append({
                 "name": e.get("name", ""),
                 "stage": e.get("stage", ""),
-                "call_date": e.get("triggered_at", "")[:10],
-                "call_time": e.get("triggered_at", "")[11:16],
+                "call_date": call_date,
+                "call_time": call_time,
                 "ai_summary": ai_summary,
                 "result_label": result_label,
                 "result_color": result_color,
