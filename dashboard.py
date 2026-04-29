@@ -980,6 +980,8 @@ async def api_call_log():
         ai_summary = e.get("ai_summary", "")
 
         if call_started == "NO":
+            if "outbound-daily-limit" in ended_reason:
+                return "Daily limit reached", "#f97316"
             return "Did not connect", "#94a3b8"
         if outcome.startswith("BOOKED"):
             return outcome, "#22c55e"
@@ -1006,8 +1008,12 @@ async def api_call_log():
             return "Spoke — see summary", "#4C6EF5"
         return "No summary", "#94a3b8"
 
+    TEST_NUMBERS = {"+18132145068", "18132145068", "8132145068"}
+
     entries = []
     for e in raw_entries:
+        if e.get("phone", "").replace(" ", "").replace("-", "") in TEST_NUMBERS:
+            continue
         call_date, call_time = _to_et(e.get("triggered_at", "") or e.get("started_at", ""))
         result_label, result_color = _outcome_label(e)
         dur = e.get("duration_seconds", 0)

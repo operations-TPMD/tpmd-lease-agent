@@ -902,12 +902,12 @@ async def execute_action(
         return "\n".join(log_lines)
 
     if action == "trigger_voice_bot":
-        # Hard enforce: calls only allowed at 10 AM ET
+        # Hard enforce: calls only allowed at 9-10 AM ET (scanner runs at 9 AM)
         import zoneinfo as _zi
         _et = _zi.ZoneInfo("America/New_York")
         _now_et = datetime.now(_et)
-        if not dry_run and _now_et.hour != 10:
-            log_lines.append(f"  ⏰ SKIP call for {name} — voice bot only runs at 10 AM ET (now {_now_et.strftime('%H:%M')} ET)")
+        if not dry_run and _now_et.hour not in (9, 10):
+            log_lines.append(f"  ⏰ SKIP call for {name} — voice bot only runs at 9-10 AM ET (now {_now_et.strftime('%H:%M')} ET)")
             return "\n".join(log_lines)
         if dry_run:
             log_lines.append(f"  📞 [DRY RUN] Would trigger voice bot for {name}")
