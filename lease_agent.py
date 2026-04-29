@@ -393,24 +393,21 @@ SYSTEM_PROMPT_BASE = """You are a lead management assistant for The Property Man
 ══════════════════════════════════════════════
 ⚠️  RULE #0 — THE MOST IMPORTANT RULE: NO REPETITION
 ══════════════════════════════════════════════
-Before writing any message, carefully read EVERY previous outbound message in this conversation.
+MANDATORY — before deciding ANYTHING, scan the full conversation history and answer:
+  1. What has already been told to this lead? (list: link sent? property details shared? which ones? scheduling asked?)
+  2. What was the lead's last message and have we responded to it?
+  3. Is there genuinely NEW information or a NEW angle not yet covered?
 
-Your message MUST be completely different from all previous messages in:
-  • Opening line (never start with the same first sentence or greeting pattern)
-  • Approach and angle (don't repeat the same reason for reaching out)
-  • Tone (rotate: warm → curious → empathetic → direct → playful → practical)
-  • Sentence structure (don't copy the structure even if you change the words)
-  • CTA phrasing (never repeat "complete the verification here" or "schedule your showing here" with same wording)
+If the answer to (3) is NO → action must be "skip". Do not rephrase old content.
 
-This is not about rewording — it's about genuinely thinking of a DIFFERENT reason to reach out.
-Examples of different approaches for follow-ups:
-  - Mention something specific about the property they haven't heard yet
-  - Ask a genuine question about their situation or timeline
-  - Reference the neighborhood, amenities, or a seasonal angle
-  - Be direct and honest ("I keep reaching out because I think this is a great fit")
-  - Keep it ultra-short ("Still interested? — Sivan")
+Rules for what counts as "new":
+  • A link already sent → NOT new, don't send it again
+  • A property detail already mentioned → NOT new, don't repeat it
+  • "Let me know when you're ready" / "we'd love to schedule" → if said before, NOT new
+  • A direct RESPONSE to something the lead said today → IS new (reply to their question)
+  • A genuinely different property fact, neighborhood angle, or timeline question → IS new
 
-If you cannot think of a message that is meaningfully different from all previous messages → action must be "skip".
+If you cannot think of something genuinely new and useful → action must be "skip".
 ══════════════════════════════════════════════
 
 RULES:
@@ -482,11 +479,11 @@ RESPOND WITH EXACTLY THIS JSON:
 {
   "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "escalate_to_team" | "trigger_voice_bot" | "skip",
   "message": "SMS text to lead (for escalate_to_team: apologetic message to lead saying team will call them shortly)",
-  "follow_up_message": "second SMS or empty string",
   "new_stage": "Stage Name or empty string",
   "appointment_date": "YYYY-MM-DD or empty string",
   "appointment_time": "HH:MM or empty string",
   "escalation_reason": "short description of why escalating (only for escalate_to_team)",
+  "what_is_new": "one sentence: what specific new info/angle this message adds that was NOT in any previous message — or 'none' if skipping",
   "reasoning": "one sentence"
 }"""
 
@@ -1080,6 +1077,27 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
         decision = await ask_claude(client, lead)
     except Exception as e:
         return f"  ❌ ERROR deciding for {lead['name']}: {e}"
+
+    # ── Post-decision content uniqueness check ────────────────────────────────
+    # If Claude wants to send an SMS, verify the message content isn't a near-repeat
+    # of what was already said in recent outbound messages.
+    if decision.get("action") in ("send_sms", "send_sms_and_update_stage"):
+        proposed = (decision.get("message") or "").lower().split()
+        _outbound_msgs = [m["body"].lower() for m in lead.get("recent_messages", []) if m["direction"] == "outbound"]
+        if proposed and _outbound_msgs:
+            import re as _re
+            # Extract meaningful words (4+ chars, not common filler)
+            _stop = {"this","that","your","with","have","will","just","know","when","time","here","been","from","they","them","their","than","what","about","would","could","please","hello","there"}
+            def _keywords(text):
+                return {w for w in _re.findall(r'\b\w{4,}\b', text) if w not in _stop}
+            proposed_kw = _keywords(" ".join(proposed))
+            for prev_body in _outbound_msgs[:5]:  # check against last 5 outbound
+                prev_kw = _keywords(prev_body)
+                if not proposed_kw or not prev_kw:
+                    continue
+                overlap = len(proposed_kw & prev_kw) / len(proposed_kw)
+                if overlap > 0.65:  # >65% same keywords → likely a repeat
+                    return f"  ⏭ SKIP {lead['name']} — proposed message too similar to a recent outbound ({overlap:.0%} keyword overlap)"
 
     return await execute_action(client, lead, decision, dry_run)
 
