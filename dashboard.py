@@ -628,67 +628,79 @@ async def _ghl_set_bot_rules(client: httpx.AsyncClient, rules: str) -> bool:
 @app.get("/api/stale-leads")
 async def api_stale_leads_preview():
     """Preview leads with no inbound activity in 10+ days, excluding Application Sent and future showings."""
+    import asyncio as _aio
     from datetime import datetime as dt, timezone, timedelta
     cutoff = dt.now(timezone.utc) - timedelta(days=10)
+    cutoff_iso = cutoff.isoformat()
+    now_iso = dt.now(timezone.utc).isoformat()
     EXEMPT_STAGES = {"Application Sent", "Leased / Won", "Lost", "Showing Scheduled"}
+    CALENDAR_ID = "I27t4Z2T7ZG0SQlI3Syd"
 
-    stale = []
     async with httpx.AsyncClient(timeout=30) as client:
         opps = await get_all_opportunities(client)
+
+        # Filter to candidates (skip terminal/exempt stages)
+        candidates = []
         for opp in opps:
-            stage_id = opp.get("pipelineStageId", "")
-            stage_name = STAGE_MAP.get(stage_id, "")
-            opp_status = opp.get("status", "")
-
-            if stage_name in ("Leased / Won", "Lost") or opp_status == "lost":
+            stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "")
+            if stage_name in EXEMPT_STAGES or opp.get("status") == "lost":
                 continue
-            if stage_name in EXEMPT_STAGES:
-                continue
+            candidates.append(opp)
 
+        async def _check_opp(opp):
+            stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "")
             contact_id = opp.get("contactId", "")
-            contact = opp.get("contact", {})
-            name = contact.get("name", contact_id)
+            name = (opp.get("contact") or {}).get("name", contact_id)
 
-            # Check for future showing in calendar
-            appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
-            has_future_showing = False
-            now_iso = dt.now(timezone.utc).isoformat()
-            for appt in (appts or {}).get("events", []):
-                if appt.get("calendarId") == "I27t4Z2T7ZG0SQlI3Syd" and appt.get("startTime", "") > now_iso:
-                    has_future_showing = True
-                    break
-            if has_future_showing:
-                continue
+            try:
+                # Check appointments and conversations in parallel
+                appts_task = ghl_get(client, f"/contacts/{contact_id}/appointments")
+                convos_task = ghl_get(client, "/conversations/search", {
+                    "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
+                })
+                appts_data, convos_data = await _aio.gather(appts_task, convos_task, return_exceptions=True)
 
-            # Check last inbound message date
-            convos = await ghl_get(client, "/conversations/search", {
-                "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
-            })
-            last_inbound = None
-            for conv in convos.get("conversations", []):
-                msgs = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 20})
-                for m in msgs.get("messages", {}).get("messages", []):
-                    if m.get("direction") == "inbound":
-                        last_inbound = m.get("dateAdded", "")
-                        break
-                if last_inbound:
-                    break
+                # Future showing check
+                if not isinstance(appts_data, Exception):
+                    for appt in (appts_data or {}).get("events", []):
+                        if appt.get("calendarId") == CALENDAR_ID and appt.get("startTime", "") > now_iso:
+                            return None  # has future showing, skip
 
-            # Determine if stale
-            if not last_inbound:
-                # Never replied — check creation date
+                # Last inbound message
+                last_inbound = None
+                if not isinstance(convos_data, Exception):
+                    for conv in convos_data.get("conversations", []):
+                        try:
+                            msgs = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 20})
+                            for m in (msgs.get("messages") or {}).get("messages", []):
+                                if m.get("direction") == "inbound":
+                                    last_inbound = m.get("dateAdded", "")
+                                    break
+                        except Exception:
+                            pass
+                        if last_inbound:
+                            break
+
                 created = opp.get("createdAt", "")
-                if created and created < cutoff.isoformat():
-                    stale.append({"opp_id": opp["id"], "contact_id": contact_id, "name": name,
-                                  "stage": stage_name, "last_inbound": "Never", "created": created[:10]})
-            else:
-                try:
+                if not last_inbound:
+                    if created and created < cutoff_iso:
+                        return {"opp_id": opp["id"], "contact_id": contact_id, "name": name,
+                                "stage": stage_name, "last_inbound": "Never", "created": created[:10]}
+                else:
                     last_dt = dt.fromisoformat(last_inbound.replace("Z", "+00:00"))
                     if last_dt < cutoff:
-                        stale.append({"opp_id": opp["id"], "contact_id": contact_id, "name": name,
-                                      "stage": stage_name, "last_inbound": last_inbound[:10], "created": opp.get("createdAt","")[:10]})
-                except Exception:
-                    pass
+                        return {"opp_id": opp["id"], "contact_id": contact_id, "name": name,
+                                "stage": stage_name, "last_inbound": last_inbound[:10], "created": created[:10]}
+            except Exception:
+                pass
+            return None
+
+        # Process in parallel batches of 8
+        stale = []
+        for i in range(0, len(candidates), 8):
+            batch = candidates[i:i+8]
+            results = await _aio.gather(*[_check_opp(o) for o in batch])
+            stale.extend(r for r in results if r)
 
     return JSONResponse({"stale": stale, "count": len(stale)})
 
