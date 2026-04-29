@@ -631,76 +631,76 @@ async def api_stale_leads_preview():
     import asyncio as _aio
     from datetime import datetime as dt, timezone, timedelta
     cutoff = dt.now(timezone.utc) - timedelta(days=10)
-    cutoff_iso = cutoff.isoformat()
     now_iso = dt.now(timezone.utc).isoformat()
     EXEMPT_STAGES = {"Application Sent", "Leased / Won", "Lost", "Showing Scheduled"}
     CALENDAR_ID = "I27t4Z2T7ZG0SQlI3Syd"
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async def _last_inbound(client, contact_id):
+        """Return last inbound message dateAdded, or None."""
+        try:
+            convos = await ghl_get(client, "/conversations/search", {
+                "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
+            })
+            for conv in convos.get("conversations", []):
+                msgs = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 50})
+                for m in (msgs.get("messages") or {}).get("messages", []):
+                    if m.get("direction") == "inbound":
+                        return m.get("dateAdded", "")
+        except Exception:
+            pass
+        return None
+
+    async def _has_future_showing(client, contact_id):
+        try:
+            appts = await ghl_get(client, f"/contacts/{contact_id}/appointments")
+            for appt in (appts or {}).get("events", []):
+                if appt.get("calendarId") == CALENDAR_ID and appt.get("startTime", "") > now_iso:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async with httpx.AsyncClient(timeout=60) as client:
         opps = await get_all_opportunities(client)
 
-        # Filter to candidates (skip terminal/exempt stages)
-        candidates = []
-        for opp in opps:
-            stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "")
-            if stage_name in EXEMPT_STAGES or opp.get("status") == "lost":
-                continue
-            candidates.append(opp)
+        # Filter to non-exempt candidates
+        candidates = [
+            o for o in opps
+            if STAGE_MAP.get(o.get("pipelineStageId", ""), "") not in EXEMPT_STAGES
+            and o.get("status") != "lost"
+        ]
 
-        async def _check_opp(opp):
-            stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "")
-            contact_id = opp.get("contactId", "")
-            name = (opp.get("contact") or {}).get("name", contact_id)
-
-            try:
-                # Check appointments and conversations in parallel
-                appts_task = ghl_get(client, f"/contacts/{contact_id}/appointments")
-                convos_task = ghl_get(client, "/conversations/search", {
-                    "locationId": GHL_LOCATION_ID, "contactId": contact_id, "limit": 1
-                })
-                appts_data, convos_data = await _aio.gather(appts_task, convos_task, return_exceptions=True)
-
-                # Future showing check
-                if not isinstance(appts_data, Exception):
-                    for appt in (appts_data or {}).get("events", []):
-                        if appt.get("calendarId") == CALENDAR_ID and appt.get("startTime", "") > now_iso:
-                            return None  # has future showing, skip
-
-                # Last inbound message
-                last_inbound = None
-                if not isinstance(convos_data, Exception):
-                    for conv in convos_data.get("conversations", []):
-                        try:
-                            msgs = await ghl_get(client, f"/conversations/{conv['id']}/messages", {"limit": 20})
-                            for m in (msgs.get("messages") or {}).get("messages", []):
-                                if m.get("direction") == "inbound":
-                                    last_inbound = m.get("dateAdded", "")
-                                    break
-                        except Exception:
-                            pass
-                        if last_inbound:
-                            break
-
+        stale = []
+        # Process in batches of 5 to avoid GHL rate limits
+        for i in range(0, len(candidates), 5):
+            batch = candidates[i:i+5]
+            for opp in batch:
+                stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "")
+                contact_id = opp.get("contactId", "")
+                name = (opp.get("contact") or {}).get("name", contact_id)
                 created = opp.get("createdAt", "")
+
+                # Check appointments first — skip if future showing booked
+                if await _has_future_showing(client, contact_id):
+                    continue
+
+                # Find last inbound message
+                last_inbound = await _last_inbound(client, contact_id)
+
                 if not last_inbound:
-                    if created and created < cutoff_iso:
-                        return {"opp_id": opp["id"], "contact_id": contact_id, "name": name,
-                                "stage": stage_name, "last_inbound": "Never", "created": created[:10]}
+                    # Never replied — stale if created > 10 days ago
+                    if created:
+                        created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+                        if created_dt < cutoff:
+                            stale.append({"opp_id": opp["id"], "contact_id": contact_id,
+                                          "name": name, "stage": stage_name,
+                                          "last_inbound": "Never", "created": created[:10]})
                 else:
                     last_dt = dt.fromisoformat(last_inbound.replace("Z", "+00:00"))
                     if last_dt < cutoff:
-                        return {"opp_id": opp["id"], "contact_id": contact_id, "name": name,
-                                "stage": stage_name, "last_inbound": last_inbound[:10], "created": created[:10]}
-            except Exception:
-                pass
-            return None
-
-        # Process in parallel batches of 8
-        stale = []
-        for i in range(0, len(candidates), 8):
-            batch = candidates[i:i+8]
-            results = await _aio.gather(*[_check_opp(o) for o in batch])
-            stale.extend(r for r in results if r)
+                        stale.append({"opp_id": opp["id"], "contact_id": contact_id,
+                                      "name": name, "stage": stage_name,
+                                      "last_inbound": last_inbound[:10], "created": created[:10]})
 
     return JSONResponse({"stale": stale, "count": len(stale)})
 
