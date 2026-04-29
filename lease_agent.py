@@ -415,12 +415,12 @@ If you cannot think of a message that is meaningfully different from all previou
 
 RULES:
 1. DND enabled → always skip
-2. Max 2 proactive outbound SMS/day (ET). Instant replies to inbound are exempt.
+2. MAX 1 outbound SMS per contact per day. If you already sent one today and they haven't replied since → action must be "skip".
 3. 3+ unanswered outbound in a row → wait 2 days before next SMS
 4. SMS max 160 chars (hard limit 300). Sign as "Sivan" or "The PMD team".
 5. Answer lead questions directly from PROPERTY DETAILS before any CTA.
 6. NEVER say "ID", "identity verification", or "upload ID". Use the schedule link only.
-7. Direct question from lead → TWO messages: answer in "message", CTA in "follow_up_message". Proactive → one message only.
+7. ONE message only — never use follow_up_message. Put everything in a single SMS.
 7b. CONVERSATION-FIRST messaging for Verification Auto-Sent / ID Verified / ID Rejected stages (SMS path):
     - Message 1 (first ever outbound): warm greeting + one genuine question about their interest/timeline. NO link yet.
     - Message 2 (if no reply after 1-2 days): light check-in, completely different angle (specific property detail, neighborhood, humor). Still no link unless they replied.
@@ -1043,51 +1043,38 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
             return f"  ❌ ERROR closing unavailable lead {name}: {e}"
         return f"  🚫 {name}: property unavailable → notified + moved to Lost"
 
-    # Hard enforce Rule 3: 3+ consecutive unanswered outbound → skip (wait 2 days)
+    from datetime import date as _date
+    _today = lead.get("current_time", "")[:10]
+    _last_out = lead.get("last_outbound_date", "")
+
+    # ── HARD CAP: max 1 outbound SMS per contact per day ─────────────────────
+    # recent_messages is newest-first. If the latest message is already outbound
+    # (we sent last), don't send again today — lead hasn't replied since.
+    _msgs = lead.get("recent_messages", [])
+    _sent_today = sum(1 for m in _msgs if m["direction"] == "outbound" and m["date"][:10] == _today)
+    _latest_is_outbound = bool(_msgs) and _msgs[0]["direction"] == "outbound"
+
+    if _sent_today >= 1 and _latest_is_outbound:
+        return f"  ⏭ SKIP {lead['name']} — sent {_sent_today} SMS today, waiting for their reply (daily cap)"
+
+    if _sent_today >= 2:
+        # Even if they replied today, hard max is 2 per day
+        return f"  ⏭ SKIP {lead['name']} — {_sent_today} SMS already sent today (absolute daily cap)"
+
+    # ── Hard enforce Rule 3: 3+ consecutive unanswered → wait 2 days ─────────
     consecutive = 0
-    for msg in lead.get("recent_messages", []):
+    for msg in _msgs:
         if msg["direction"] == "outbound":
             consecutive += 1
         elif msg["direction"] == "inbound":
             break
     if consecutive >= 3:
-        last_out = lead.get("last_outbound_date", "")
         try:
-            from datetime import date as _date
-            days_since_last = (_date.fromisoformat(lead['current_time'][:10]) - _date.fromisoformat(last_out)).days if last_out else 99
-        except:
+            days_since_last = (_date.fromisoformat(_today) - _date.fromisoformat(_last_out)).days if _last_out else 99
+        except Exception:
             days_since_last = 99
         if days_since_last < 2:
             return f"  ⏭ SKIP {lead['name']} ({consecutive} unanswered outbound, last sent {days_since_last}d ago — waiting 2 days)"
-
-    # Hard enforce: block spam — same link OR same opening words 3+ times in a row
-    import re as _re
-    all_outbound = [m for m in lead.get("recent_messages", []) if m["direction"] == "outbound"]
-    if len(all_outbound) >= 3:
-        def _extract_links(body):
-            return set(_re.findall(r'https?://\S+', body or ""))
-        def _opening(body):
-            # First 6 words, lowercased — detects "Hi X! We still need your ID..."
-            words = (body or "").lower().split()
-            return " ".join(words[:6])
-
-        last3 = all_outbound[:3]
-        last3_links = [_extract_links(m.get("body", "")) for m in last3]
-        last3_openings = [_opening(m.get("body", "")) for m in last3]
-
-        same_link = last3_links[0] and all(ls == last3_links[0] for ls in last3_links[1:])
-        same_opening = last3_openings[0] and all(o == last3_openings[0] for o in last3_openings[1:])
-
-        if same_link or same_opening:
-            last_out = lead.get("last_outbound_date", "")
-            try:
-                from datetime import date as _date
-                days_since_last = (_date.fromisoformat(lead['current_time'][:10]) - _date.fromisoformat(last_out)).days if last_out else 99
-            except:
-                days_since_last = 99
-            if days_since_last < 2:
-                reason = "same link" if same_link else "same opening phrasing"
-                return f"  ⏭ SKIP {lead['name']} ({reason} repeated 3+ times, last sent {days_since_last}d ago — avoiding spam)"
 
     try:
         decision = await ask_claude(client, lead)
