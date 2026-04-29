@@ -54,7 +54,6 @@ async def main():
         existing = []
 
     existing_call_ids = {e.get("vapi_call_id") for e in existing if e.get("vapi_call_id")}
-    existing_contact_ids = {e.get("contact_id") for e in existing}
     added = []
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -68,27 +67,42 @@ async def main():
 
         print(f"Found {len(vapi_calls)} VAPI calls\n")
 
-        # Build GHL contact lookup by phone
-        print("Loading GHL opportunities for phone matching...")
+        # Build GHL contact lookup by phone — fetch full contact data for each opp
+        print("Loading GHL opportunities and fetching full contact details...")
         opps = await get_all_opportunities(client)
         phone_to_contact = {}
         contact_id_to_info = {}
-        for opp in opps:
-            contact = opp.get("contact", {})
+        for i, opp in enumerate(opps):
             contact_id = opp.get("contactId", "")
             stage_id = opp.get("pipelineStageId", "")
             stage = STAGE_MAP.get(stage_id, "Unknown")
-            name = contact.get("name", contact_id)
-            for phone in [contact.get("phone", ""), contact.get("phone1", "")]:
-                if phone:
-                    normalized = phone.strip().replace(" ", "").replace("-", "")
-                    if not normalized.startswith("+"):
-                        normalized = "+" + normalized
-                    phone_to_contact[normalized] = contact_id
+            name = opp.get("contact", {}).get("name", contact_id)
             contact_id_to_info[contact_id] = {"name": name, "stage": stage}
 
-        print(f"Loaded {len(opps)} GHL contacts\n")
+            try:
+                contact_data = await ghl_get(client, f"/contacts/{contact_id}")
+                full_contact = contact_data.get("contact", {})
+                name = full_contact.get("name", name)
+                contact_id_to_info[contact_id]["name"] = name
+                # GHL stores phone in "phone" field
+                raw_phone = full_contact.get("phone", "")
+                if raw_phone:
+                    normalized = raw_phone.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+                    if not normalized.startswith("+"):
+                        normalized = "+1" + normalized.lstrip("1")
+                    phone_to_contact[normalized] = contact_id
+                    # Also store last-10-digits key for fallback
+                    phone_to_contact[normalized[-10:]] = contact_id
+            except Exception as e:
+                print(f"  WARN: could not fetch contact {contact_id}: {e}")
 
+            if (i + 1) % 20 == 0:
+                print(f"  Loaded {i+1}/{len(opps)} contacts...")
+
+        print(f"Loaded {len(opps)} GHL contacts, built {len(phone_to_contact)} phone entries\n")
+
+        no_phone_count = 0
+        already_logged = 0
         for call in vapi_calls:
             call_id = call.get("id", "")
             summary = call.get("summary", "") or call.get("analysis", {}).get("summary", "")
@@ -98,9 +112,11 @@ async def main():
             ended_reason = call.get("endedReason", "")
 
             if call_id in existing_call_ids:
+                already_logged += 1
                 continue
 
             if not customer_phone:
+                no_phone_count += 1
                 continue
 
             # Normalize phone
@@ -108,20 +124,10 @@ async def main():
             if not phone.startswith("+"):
                 phone = "+" + phone
 
-            contact_id = phone_to_contact.get(phone)
-            if not contact_id:
-                # Try last 10 digits match
-                digits = phone[-10:]
-                for p, cid in phone_to_contact.items():
-                    if p.endswith(digits):
-                        contact_id = cid
-                        break
+            contact_id = phone_to_contact.get(phone) or phone_to_contact.get(phone[-10:])
 
             if not contact_id:
                 print(f"  SKIP {phone} — no matching GHL contact")
-                continue
-
-            if contact_id in existing_contact_ids:
                 continue
 
             info = contact_id_to_info.get(contact_id, {})
@@ -140,11 +146,11 @@ async def main():
                 "backfilled": True,
             }
             added.append(entry)
-            existing_contact_ids.add(contact_id)
             existing_call_ids.add(call_id)
             status = f"summary: {summary[:60]}..." if summary else f"no summary ({ended_reason})"
             print(f"  ✅ {name} ({stage}) — {status}")
 
+    print(f"\nStats: {already_logged} already in log, {no_phone_count} had no phone number")
     if added:
         all_entries = existing + added
         with open(CALL_LOG_FILE, "w", encoding="utf-8") as f:

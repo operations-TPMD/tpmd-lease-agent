@@ -963,18 +963,30 @@ async def api_call_log():
         raw_entries = []
 
     # Show all calls per contact (multiple calls allowed)
+    # Cache GHL summaries per contact to avoid N API calls
+    summary_cache = {}
     entries = []
+    unique_contacts = list({e.get("contact_id") for e in raw_entries if e.get("contact_id")})
     async with httpx.AsyncClient(timeout=30) as client:
-        for e in raw_entries:
-            contact_id = e.get("contact_id", "")
-            ai_summary = ""
+        # Fetch AI summaries for all unique contacts in parallel (batches of 10)
+        async def _fetch_summary(cid):
             try:
-                contact_data = await ghl_get(client, f"/contacts/{contact_id}")
+                contact_data = await ghl_get(client, f"/contacts/{cid}")
                 custom_fields = contact_data.get("contact", {}).get("customFields", [])
                 parsed = parse_custom_fields(custom_fields)
-                ai_summary = parsed.get("ai_summary", "")
+                return cid, parsed.get("ai_summary", "")
             except Exception:
-                pass
+                return cid, ""
+        for i in range(0, len(unique_contacts), 10):
+            batch = unique_contacts[i:i+10]
+            results = await asyncio.gather(*[_fetch_summary(cid) for cid in batch])
+            for cid, summary in results:
+                summary_cache[cid] = summary
+
+        for e in raw_entries:
+            contact_id = e.get("contact_id", "")
+            # Use GHL live summary if available, else fall back to stored summary
+            ai_summary = summary_cache.get(contact_id) or e.get("ai_summary", "")
 
             if not ai_summary:
                 result_label = "No answer / No summary"
@@ -2426,12 +2438,12 @@ async function openConvReview(leadId) {
       </div>
       <div style="color:#111;line-height:1.4">${esc(m.body)}</div>
       ${!isInbound ? `<div style="margin-top:8px">
-        <button onclick="reviewMsg(${origIdx},'good')" style="background:#D1FAE5;color:#065F46;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">👍 טוב</button>
-        <button onclick="reviewMsg(${origIdx},'bad')" style="background:#FEE2E2;color:#991B1B;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600;margin-left:6px">👎 בעיה</button>
+        <button onclick="reviewMsg(${origIdx},'good')" style="background:#D1FAE5;color:#065F46;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">👍 Good</button>
+        <button onclick="reviewMsg(${origIdx},'bad')" style="background:#FEE2E2;color:#991B1B;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600;margin-left:6px">👎 Issue</button>
         <span id="rv-status-${origIdx}" style="font-size:10px;color:var(--muted);margin-left:8px"></span>
         <div id="rv-fix-${origIdx}" style="display:none;margin-top:6px">
-          <textarea id="rv-input-${origIdx}" placeholder="מה הבעיה? למה ההודעה הזו לא טובה? (הפידבק יוזן לבוט)" style="width:100%;height:65px;border:1px solid #E2DDF0;border-radius:5px;padding:6px;font-size:11px;resize:none;outline:none;direction:rtl"></textarea>
-          <button onclick="submitConvReview(${origIdx})" style="margin-top:4px;background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">📌 הוסף כחוק לבוט</button>
+          <textarea id="rv-input-${origIdx}" placeholder="What's the issue? Why is this message bad? (feedback will train the bot)" style="width:100%;height:65px;border:1px solid #E2DDF0;border-radius:5px;padding:6px;font-size:11px;resize:none;outline:none"></textarea>
+          <button onclick="submitConvReview(${origIdx})" style="margin-top:4px;background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">📌 Add as Bot Rule</button>
         </div>
       </div>` : ''}
     </div>`;
