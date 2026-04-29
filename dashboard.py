@@ -962,16 +962,10 @@ async def api_call_log():
     except (FileNotFoundError, ValueError):
         raw_entries = []
 
-    # Deduplicate: keep latest trigger per contact
-    seen = {}
-    for e in raw_entries:
-        cid = e.get("contact_id", "")
-        if cid not in seen or e["triggered_at"] > seen[cid]["triggered_at"]:
-            seen[cid] = e
-
+    # Show all calls per contact (multiple calls allowed)
     entries = []
     async with httpx.AsyncClient(timeout=30) as client:
-        for e in seen.values():
+        for e in raw_entries:
             contact_id = e.get("contact_id", "")
             ai_summary = ""
             try:
@@ -2431,13 +2425,13 @@ async function openConvReview(leadId) {
         <span>${label}</span><span>${m.date?.slice(0,10)||''}</span>
       </div>
       <div style="color:#111;line-height:1.4">${esc(m.body)}</div>
-      ${isBot ? `<div style="margin-top:8px">
-        <button onclick="reviewMsg(${origIdx},'good')" style="background:#D1FAE5;color:#065F46;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">👍</button>
-        <button onclick="reviewMsg(${origIdx},'bad')" style="background:#FEE2E2;color:#991B1B;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600;margin-left:6px">❌ Fix</button>
+      ${!isInbound ? `<div style="margin-top:8px">
+        <button onclick="reviewMsg(${origIdx},'good')" style="background:#D1FAE5;color:#065F46;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">👍 טוב</button>
+        <button onclick="reviewMsg(${origIdx},'bad')" style="background:#FEE2E2;color:#991B1B;border:none;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600;margin-left:6px">👎 בעיה</button>
         <span id="rv-status-${origIdx}" style="font-size:10px;color:var(--muted);margin-left:8px"></span>
         <div id="rv-fix-${origIdx}" style="display:none;margin-top:6px">
-          <textarea id="rv-input-${origIdx}" placeholder="What should the bot have done differently?" style="width:100%;height:55px;border:1px solid #E2DDF0;border-radius:5px;padding:6px;font-size:11px;resize:none;outline:none"></textarea>
-          <button onclick="submitConvReview(${origIdx})" style="margin-top:4px;background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">Add as Rule</button>
+          <textarea id="rv-input-${origIdx}" placeholder="מה הבעיה? למה ההודעה הזו לא טובה? (הפידבק יוזן לבוט)" style="width:100%;height:65px;border:1px solid #E2DDF0;border-radius:5px;padding:6px;font-size:11px;resize:none;outline:none;direction:rtl"></textarea>
+          <button onclick="submitConvReview(${origIdx})" style="margin-top:4px;background:linear-gradient(135deg,#7B2FBE,#4C6EF5);color:white;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">📌 הוסף כחוק לבוט</button>
         </div>
       </div>` : ''}
     </div>`;
