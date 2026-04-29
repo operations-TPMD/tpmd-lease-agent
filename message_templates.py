@@ -227,7 +227,7 @@ def format_template(template_id: str, lead: dict) -> str | None:
         "rent": rent or "call for pricing",
         "special_offer": special or "",
         "property_highlights": highlights or "",
-        "id_link": "https://thepropertymanagementdoctor.com/verify",
+        "id_link": f"https://thepropertymanagementdoctor.com/go?c={lead.get('contact_id', '')}&t=id",
         "code": lead.get("lock_code", "N/A"),
         "app_link": lead.get("application_url", ""),
     }

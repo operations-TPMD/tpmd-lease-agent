@@ -148,15 +148,15 @@ def parse_custom_fields(custom_fields: list[dict]) -> dict:
 
 
 def _build_id_url(contact: dict, property_address: str = "") -> str:
-    """Build branded short URL via tpmd.io/go redirect page."""
+    """Build branded short URL via thepropertymanagementdoctor.com/go redirect page."""
     contact_id = contact.get("id", "")
-    return f"https://tpmd.io/go?c={contact_id}&t=id"
+    return f"https://thepropertymanagementdoctor.com/go?c={contact_id}&t=id"
 
 
 def _build_reschedule_url(contact: dict, property_address: str = "") -> str:
-    """Build branded short URL via tpmd.io/go redirect page."""
+    """Build branded short URL via thepropertymanagementdoctor.com/go redirect page."""
     contact_id = contact.get("id", "")
-    return f"https://tpmd.io/go?c={contact_id}&t=book"
+    return f"https://thepropertymanagementdoctor.com/go?c={contact_id}&t=book"
 
 
 SEND_CODE_TRIGGER_LINK_ID = "5iDHWuijJ9VVYBx02kY2"
@@ -174,7 +174,7 @@ async def _get_trigger_link_url(client, contact_id: str) -> str:
     except Exception:
         pass
     # Fallback: direct URL
-    return f"https://tpmd.io/verifying-access?contact_id={contact_id}"
+    return f"https://thepropertymanagementdoctor.com/go?c={contact_id}&t=id"
 
 
 async def enrich_lead(client: httpx.AsyncClient, opp: dict) -> dict:
@@ -395,16 +395,18 @@ RULES:
 2. Max 2 proactive outbound SMS/day (ET). Instant replies to inbound are exempt.
 3. 3+ unanswered outbound in a row → wait 2 days before next SMS
 4. SMS max 160 chars (hard limit 300). Sign as "Sivan" or "The PMD team".
-5. Never repeat content already said in the conversation. Before sending, scan ALL previous outbound messages — if the same information, link, or CTA was already sent, do NOT send it again in any form or wording. Exceptions: showing reminders (today/tomorrow) and the scheduling link if lead hasn't booked yet.
+5. STRICT NO-REPEAT RULE: Before writing ANY message, read every previous outbound message in this conversation. If the new message shares a similar opening, similar structure, or a similar CTA — rewrite it completely. The goal: a human reading the full conversation thread should feel like a real person thought carefully about each message from scratch. Different angle, different tone, different sentence structure every single time.
+   - You MAY include the scheduling link in follow-ups, but the surrounding message must be completely different in approach (not just swapping a word or two).
+   - Ask yourself: "If I showed this thread to someone, would the last 3 messages feel like the same person copy-pasting?" If yes → rewrite.
 6. Answer lead questions directly from PROPERTY DETAILS before any CTA.
 7. NEVER say "ID", "identity verification", or "upload ID". Use the schedule link only.
 8. Direct question from lead → TWO messages: answer in "message", CTA in "follow_up_message". Proactive → one message only.
 8b. CONVERSATION-FIRST messaging for Verification Auto-Sent / ID Verified / ID Rejected stages (SMS path):
     - Message 1 (first ever outbound): warm greeting + one genuine question about their interest/timeline. NO link yet.
-    - Message 2 (if no reply after 1-2 days): light check-in, different angle, still no link unless they replied.
-    - Message 3+ (if they replied OR after 2+ attempts): only NOW include the scheduling link, naturally woven into the message — not as a standalone CTA.
-    - NEVER lead with the link. The link should feel like a next step they're being invited to, not a task they're being assigned.
-    - Vary tone each time: curious → helpful → gentle nudge. Never repeat the same phrasing.
+    - Message 2 (if no reply after 1-2 days): light check-in, completely different angle (try humor, a genuine observation, a specific detail about the property). Still no link unless they replied.
+    - Message 3+ (if they replied OR after 2+ attempts): only NOW include the scheduling link, naturally woven into context — never as a standalone CTA.
+    - NEVER lead with the link. It should feel like a next step they're being invited to, not a task.
+    - Each message must have a noticeably different tone and structure: curious → empathetic → direct. Never repeat phrasing from prior messages.
 9. Days Since Showing = N/A → showing hasn't happened OR ended less than 1 hour ago. NEVER ask "how was the showing?" until at least 1 hour has passed since the showing time.
 10. Lead responded today → no proactive follow-up. Respond only if they asked something.
 11. Honor what the lead said (rescheduled, confirmed, never went). Don't contradict them.
@@ -979,15 +981,25 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
         if days_since_last < 2:
             return f"  ⏭ SKIP {lead['name']} ({consecutive} unanswered outbound, last sent {days_since_last}d ago — waiting 2 days)"
 
-    # Hard enforce: if the last 3+ outbound messages (even after inbound replies) all share
-    # the same scheduling link → we've been spamming. Block for 2 days.
+    # Hard enforce: block spam — same link OR same opening words 3+ times in a row
     import re as _re
     all_outbound = [m for m in lead.get("recent_messages", []) if m["direction"] == "outbound"]
     if len(all_outbound) >= 3:
         def _extract_links(body):
             return set(_re.findall(r'https?://\S+', body or ""))
-        last3_links = [_extract_links(m.get("body", "")) for m in all_outbound[:3]]
-        if last3_links[0] and all(ls == last3_links[0] for ls in last3_links[1:]):
+        def _opening(body):
+            # First 6 words, lowercased — detects "Hi X! We still need your ID..."
+            words = (body or "").lower().split()
+            return " ".join(words[:6])
+
+        last3 = all_outbound[:3]
+        last3_links = [_extract_links(m.get("body", "")) for m in last3]
+        last3_openings = [_opening(m.get("body", "")) for m in last3]
+
+        same_link = last3_links[0] and all(ls == last3_links[0] for ls in last3_links[1:])
+        same_opening = last3_openings[0] and all(o == last3_openings[0] for o in last3_openings[1:])
+
+        if same_link or same_opening:
             last_out = lead.get("last_outbound_date", "")
             try:
                 from datetime import date as _date
@@ -995,7 +1007,8 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
             except:
                 days_since_last = 99
             if days_since_last < 2:
-                return f"  ⏭ SKIP {lead['name']} (same link repeated 3+ times, last sent {days_since_last}d ago — avoiding spam)"
+                reason = "same link" if same_link else "same opening phrasing"
+                return f"  ⏭ SKIP {lead['name']} ({reason} repeated 3+ times, last sent {days_since_last}d ago — avoiding spam)"
 
     try:
         decision = await ask_claude(client, lead)
