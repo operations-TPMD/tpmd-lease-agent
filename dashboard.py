@@ -952,9 +952,9 @@ async def api_vapi_webhook(request: Request):
 
 @app.get("/api/call-log")
 async def api_call_log():
-    """Return call log from local file + live AI Summary from GHL."""
+    """Return call log from local file — all data comes from VAPI, no GHL calls needed."""
     import json as _json
-    from lease_agent import CALL_LOG_FILE, parse_custom_fields, ghl_get
+    from lease_agent import CALL_LOG_FILE
 
     try:
         with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
@@ -962,69 +962,70 @@ async def api_call_log():
     except (FileNotFoundError, ValueError):
         raw_entries = []
 
-    # Show all calls per contact (multiple calls allowed)
-    # Cache GHL summaries per contact to avoid N API calls
-    summary_cache = {}
+    def _to_et(ts):
+        if not ts:
+            return "", ""
+        try:
+            eastern = timezone(timedelta(hours=-4))
+            dt_utc = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            dt_et = dt_utc.astimezone(eastern)
+            return dt_et.strftime("%Y-%m-%d"), dt_et.strftime("%H:%M")
+        except Exception:
+            return ts[:10], ts[11:16]
+
+    def _outcome_label(e):
+        outcome = e.get("outcome", "")
+        call_started = e.get("call_started", "YES")
+        ended_reason = e.get("ended_reason", "")
+        ai_summary = e.get("ai_summary", "")
+
+        if call_started == "NO":
+            return "Did not connect", "#94a3b8"
+        if outcome.startswith("BOOKED"):
+            return outcome, "#22c55e"
+        if outcome == "CANCELLED":
+            return "Cancelled", "#ef4444"
+        if outcome.startswith("RESCHEDULED"):
+            return outcome, "#4C6EF5"
+        if outcome == "SUCCESS":
+            return "Success", "#22c55e"
+        if outcome == "NOT_SUCCESS":
+            sl = ai_summary.lower()
+            if any(w in sl for w in ["voicemail", "no answer", "left message", "mailbox"]):
+                return "Voicemail", "#f59e0b"
+            if any(w in sl for w in ["not interested", "no longer", "do not call", "wrong number"]):
+                return "Not interested", "#ef4444"
+            if "full" in sl and "mailbox" in sl:
+                return "Mailbox full", "#f59e0b"
+            return "Not successful", "#f59e0b"
+        if ended_reason == "silence-timed-out":
+            return "Voicemail / No answer", "#f59e0b"
+        if ended_reason == "customer-did-not-answer":
+            return "No answer", "#94a3b8"
+        if ai_summary:
+            return "Spoke — see summary", "#4C6EF5"
+        return "No summary", "#94a3b8"
+
     entries = []
-    unique_contacts = list({e.get("contact_id") for e in raw_entries if e.get("contact_id")})
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Fetch AI summaries for all unique contacts in parallel (batches of 10)
-        async def _fetch_summary(cid):
-            try:
-                contact_data = await ghl_get(client, f"/contacts/{cid}")
-                custom_fields = contact_data.get("contact", {}).get("customFields", [])
-                parsed = parse_custom_fields(custom_fields)
-                return cid, parsed.get("ai_summary", "")
-            except Exception:
-                return cid, ""
-        for i in range(0, len(unique_contacts), 10):
-            batch = unique_contacts[i:i+10]
-            results = await asyncio.gather(*[_fetch_summary(cid) for cid in batch])
-            for cid, summary in results:
-                summary_cache[cid] = summary
-
-        for e in raw_entries:
-            contact_id = e.get("contact_id", "")
-            # Use GHL live summary if available, else fall back to stored summary
-            ai_summary = summary_cache.get(contact_id) or e.get("ai_summary", "")
-
-            if not ai_summary:
-                result_label = "No answer / No summary"
-                result_color = "#94a3b8"
-            else:
-                sl = ai_summary.lower()
-                if any(w in sl for w in ["voicemail", "no answer", "did not answer", "not answer", "left message"]):
-                    result_label = "Voicemail / No answer"
-                    result_color = "#f59e0b"
-                elif any(w in sl for w in ["not interested", "not looking", "no longer", "do not call", "stop", "wrong number"]):
-                    result_label = "Not interested"
-                    result_color = "#ef4444"
-                elif any(w in sl for w in ["interested", "wants to", "schedule", "showing", "yes", "would like"]):
-                    result_label = "Interested"
-                    result_color = "#22c55e"
-                else:
-                    result_label = "Spoke — see summary"
-                    result_color = "#4C6EF5"
-
-            triggered_at = e.get("triggered_at", "")
-            try:
-                eastern = timezone(timedelta(hours=-4))  # EDT (Florida)
-                dt_utc = datetime.fromisoformat(triggered_at.replace("Z", "+00:00"))
-                dt_eastern = dt_utc.astimezone(eastern)
-                call_date = dt_eastern.strftime("%Y-%m-%d")
-                call_time = dt_eastern.strftime("%H:%M")
-            except Exception:
-                call_date = triggered_at[:10]
-                call_time = triggered_at[11:16]
-            entries.append({
-                "name": e.get("name", ""),
-                "stage": e.get("stage", ""),
-                "call_date": call_date,
-                "call_time": call_time,
-                "ai_summary": ai_summary,
-                "result_label": result_label,
-                "result_color": result_color,
-            })
+    for e in raw_entries:
+        call_date, call_time = _to_et(e.get("triggered_at", "") or e.get("started_at", ""))
+        result_label, result_color = _outcome_label(e)
+        dur = e.get("duration_seconds", 0)
+        dur_str = f"{dur}s" if dur else "—"
+        entries.append({
+            "name": e.get("name", "") or e.get("phone", ""),
+            "phone": e.get("phone", ""),
+            "stage": e.get("stage", ""),
+            "property_address": e.get("property_address", ""),
+            "call_date": call_date,
+            "call_time": call_time,
+            "call_started": e.get("call_started", "YES"),
+            "duration": dur_str,
+            "ai_summary": e.get("ai_summary", ""),
+            "outcome": e.get("outcome", ""),
+            "result_label": result_label,
+            "result_color": result_color,
+        })
 
     entries.sort(key=lambda x: x.get("call_date", ""), reverse=True)
     return JSONResponse({"calls": entries, "total": len(entries)})
@@ -1530,10 +1531,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <thead>
         <tr style="background:#f8f7fc;border-bottom:2px solid var(--border);position:sticky;top:0">
           <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Name</th>
-          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Stage</th>
-          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">תאריך שיחה</th>
-          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">תוצאה</th>
-          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">AI Summary</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Date (ET)</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Connected</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Duration</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Outcome</th>
+          <th style="padding:10px 14px;text-align:left;font-weight:600;color:var(--text)">Summary</th>
         </tr>
       </thead>
       <tbody id="callLogRows"></tbody>
@@ -2369,13 +2371,17 @@ async function loadCallLog() {
 
     rows.innerHTML = calls.map(c => `
       <tr style="border-bottom:1px solid var(--border);transition:background 0.15s" onmouseover="this.style.background='#f8f7fc'" onmouseout="this.style.background=''">
-        <td style="padding:10px 14px;font-weight:600;color:var(--text)">${esc(c.name)}</td>
-        <td style="padding:10px 14px;color:var(--muted);font-size:11px">${esc(c.stage)}</td>
-        <td style="padding:10px 14px;color:var(--muted);font-size:12px;white-space:nowrap">${c.call_date || '—'}${c.call_time ? ' ' + c.call_time : ''}</td>
-        <td style="padding:10px 14px">
+        <td style="padding:8px 12px;font-weight:600;color:var(--text);font-size:12px">
+          ${esc(c.name)}<br>
+          <span style="font-weight:400;color:var(--muted);font-size:10px">${esc(c.phone||'')} ${c.property_address ? '· '+esc(c.property_address.slice(0,30)) : ''}</span>
+        </td>
+        <td style="padding:8px 12px;color:var(--muted);font-size:11px;white-space:nowrap">${c.call_date||'—'}<br><span style="color:#94a3b8">${c.call_time||''}</span></td>
+        <td style="padding:8px 12px;text-align:center;font-size:13px">${c.call_started === 'YES' ? '✅' : '❌'}</td>
+        <td style="padding:8px 12px;color:var(--muted);font-size:11px;text-align:center">${c.duration||'—'}</td>
+        <td style="padding:8px 12px">
           <span style="background:${c.result_color}22;color:${c.result_color};border:1px solid ${c.result_color}44;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;white-space:nowrap">${esc(c.result_label)}</span>
         </td>
-        <td style="padding:10px 14px;color:var(--muted);font-size:12px">${c.ai_summary ? `<span title="${esc(c.ai_summary)}">${esc(c.ai_summary.slice(0,150))}${c.ai_summary.length>150?'…':''}</span>` : '<span style="color:var(--faint)">—</span>'}</td>
+        <td style="padding:8px 12px;color:var(--muted);font-size:11px;max-width:200px">${c.ai_summary ? `<span title="${esc(c.ai_summary)}" style="cursor:help">${esc(c.ai_summary.slice(0,100))}${c.ai_summary.length>100?'…':''}</span>` : '<span style="color:#cbd5e1">—</span>'}</td>
       </tr>`).join('');
     table.style.display = 'table';
   } catch(e) {
