@@ -826,6 +826,51 @@ async def add_contact_tag(client: httpx.AsyncClient, contact_id: str, tag: str) 
 
 CALL_LOG_FILE = os.path.join(os.path.dirname(__file__), "call_log.json")
 
+_VOICEMAIL_KEYWORDS = ["voicemail", "no answer", "left message", "mailbox", "voice mail", "did not answer", "no response"]
+_NOT_INTERESTED_KEYWORDS = ["not interested", "do not call", "wrong number", "no longer interested", "not looking", "found a place", "already found", "unsubscribe"]
+
+def _check_call_history(contact_id: str) -> tuple[bool, str]:
+    """Check prior calls for this contact. Returns (should_skip, reason)."""
+    import json as _json
+    try:
+        with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
+            entries = _json.load(f)
+    except (FileNotFoundError, ValueError):
+        return False, ""
+
+    connected = [
+        e for e in entries
+        if e.get("contact_id") == contact_id and e.get("call_started") == "YES"
+    ]
+    connected.sort(key=lambda x: x.get("started_at") or x.get("triggered_at") or "", reverse=True)
+
+    if not connected:
+        return False, ""
+
+    def _is_voicemail(e):
+        reason = e.get("ended_reason", "")
+        summary = (e.get("ai_summary") or "").lower()
+        if reason in ("silence-timed-out", "customer-did-not-answer"):
+            return True
+        if e.get("outcome") == "NOT_SUCCESS" and any(kw in summary for kw in _VOICEMAIL_KEYWORDS):
+            return True
+        return False
+
+    def _is_not_interested(e):
+        summary = (e.get("ai_summary") or "").lower()
+        return any(kw in summary for kw in _NOT_INTERESTED_KEYWORDS)
+
+    for call in connected:
+        if _is_not_interested(call):
+            return True, "expressed disinterest on a previous call — do not call again"
+
+    recent = connected[:2]
+    if len(recent) >= 2 and all(_is_voicemail(c) for c in recent):
+        return True, "went to voicemail/no-answer on last 2 calls"
+
+    return False, ""
+
+
 def _append_call_log(lead: dict):
     """Persist a call trigger event to call_log.json."""
     import json as _json
@@ -909,6 +954,13 @@ async def execute_action(
         if not dry_run and _now_et.hour not in (9, 10):
             log_lines.append(f"  ⏰ SKIP call for {name} — voice bot only runs at 9-10 AM ET (now {_now_et.strftime('%H:%M')} ET)")
             return "\n".join(log_lines)
+        # Check call history — skip if not interested or voicemail twice
+        if not dry_run:
+            _skip, _skip_reason = _check_call_history(lead.get("contact_id", ""))
+            if _skip:
+                log_lines.append(f"  ⏭ SKIP call for {name} — {_skip_reason}")
+                return "\n".join(log_lines)
+
         if dry_run:
             log_lines.append(f"  📞 [DRY RUN] Would trigger voice bot for {name}")
         else:
