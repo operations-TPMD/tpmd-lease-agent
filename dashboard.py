@@ -1429,8 +1429,14 @@ async def api_trigger_call(request: Request):
     if not normalized.startswith("+"):
         normalized = "+1" + normalized.lstrip("1")
 
-    # If property_address is missing, fetch it from GHL contact custom fields
-    if not property_address and contact_id:
+    # Fetch full contact from GHL to get ALL custom fields for VAPI
+    all_vars: dict = {
+        "name": name,
+        "first_name": name.split()[0] if name else "",
+        "property_address": property_address,
+        "contact_id": contact_id,
+    }
+    if contact_id:
         try:
             from lease_agent import parse_custom_fields as _parse_cf
             async with httpx.AsyncClient(timeout=15) as _gc:
@@ -1439,10 +1445,20 @@ async def api_trigger_call(request: Request):
                     headers=ghl_headers(),
                 )
                 if _cr.status_code == 200:
-                    _contact_data = _cr.json().get("contact", _cr.json())
-                    _custom = _parse_cf(_contact_data.get("customFields", []))
-                    property_address = _custom.get("property_address", "")
-                    logger.info(f"trigger-call: fetched property_address='{property_address}' for {contact_id}")
+                    _cd = _cr.json().get("contact", _cr.json())
+                    _custom = _parse_cf(_cd.get("customFields", []))
+                    # Merge all custom fields into vars (override blanks from request)
+                    for k, v in _custom.items():
+                        if v:  # only set non-empty values
+                            all_vars[k] = v
+                    # Also pull standard contact fields
+                    if _cd.get("email"):
+                        all_vars["email"] = _cd["email"]
+                    if _cd.get("firstName"):
+                        all_vars["first_name"] = _cd["firstName"]
+                    if _cd.get("lastName"):
+                        all_vars["last_name"] = _cd.get("lastName", "")
+                    logger.info(f"trigger-call: loaded {len(_custom)} custom fields for {contact_id}: {list(_custom.keys())}")
         except Exception as _ge:
             logger.warning(f"trigger-call: could not fetch contact details: {_ge}")
 
@@ -1451,12 +1467,7 @@ async def api_trigger_call(request: Request):
         "assistantId": VAPI_ASSISTANT_ID,
         "customer": {"number": normalized},
         "assistantOverrides": {
-            "variableValues": {
-                "name": name,
-                "first_name": name.split()[0] if name else "",
-                "property_address": property_address,
-                "contact_id": contact_id,
-            }
+            "variableValues": all_vars,
         },
     }
 
@@ -1473,8 +1484,8 @@ async def api_trigger_call(request: Request):
         call_data = resp.json()
         call_id = call_data.get("id", "")
 
-        logger.info(f"trigger-call: called {name} ({normalized}), property='{property_address}', call_id={call_id}")
-        return JSONResponse({"ok": True, "call_id": call_id, "property_address": property_address})
+        logger.info(f"trigger-call: called {name} ({normalized}), vars={list(all_vars.keys())}, call_id={call_id}")
+        return JSONResponse({"ok": True, "call_id": call_id, "property_address": all_vars.get("property_address", "")})
 
     except Exception as e:
         logger.error(f"trigger-call error: {e}", exc_info=True)

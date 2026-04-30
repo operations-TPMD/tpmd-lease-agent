@@ -71,6 +71,7 @@ CUSTOM_FIELDS = {
     "9iMgFiYh1ohk93qHIRRx": "application_url",
     "KmC7zPPVBsaz5CDez82f": "lock_code",
     "GwjeZA0k3RaWcZ1E6oyV": "showing_date",
+    "xs2ZQIQpLN8iCmGTykKF": "property_instructions",
 }
 
 
