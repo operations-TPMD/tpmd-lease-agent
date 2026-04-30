@@ -966,14 +966,88 @@ async def api_vapi_webhook(request: Request):
 
 @app.get("/api/call-log")
 async def api_call_log():
-    """Return call log from local file — all data comes from VAPI, no GHL calls needed."""
+    """Return call log — live from VAPI API (always fresh, no file dependency)."""
     import json as _json
-    from lease_agent import CALL_LOG_FILE
 
+    SO_CALL_SUMMARY_ID    = "db31e82f-c498-443f-9e08-5cd2e43b3113"
+    SO_SUCCESS_EVAL_ID    = "d45f09c9-847c-4bd5-8cd5-7ba63b3df883"
+    SO_APPT_BOOKED_ID     = "4030f8dc-4f0c-452c-a422-b6e5157e0c68"
+    SO_APPT_CANCELLED_ID  = "5da34a47-1843-4a3a-8e1e-fc69d92f3cb5"
+    SO_APPT_RESCHEDULED_ID= "8708977d-98ea-4f4b-ab96-a6ef4a719a20"
+    SO_APPT_DATETIME_ID   = "220485af-d137-4df7-827b-54814e604322"
+
+    def _parse_outcome(so):
+        if not so: return ""
+        booked      = so.get(SO_APPT_BOOKED_ID, {}).get("result")
+        cancelled   = so.get(SO_APPT_CANCELLED_ID, {}).get("result")
+        rescheduled = so.get(SO_APPT_RESCHEDULED_ID, {}).get("result")
+        success     = so.get(SO_SUCCESS_EVAL_ID, {}).get("result")
+        appt_dt     = so.get(SO_APPT_DATETIME_ID, {}).get("result", "")
+        if booked is True:      return f"BOOKED: {appt_dt}" if appt_dt else "BOOKED"
+        if cancelled is True:   return "CANCELLED"
+        if rescheduled is True: return f"RESCHEDULED: {appt_dt}" if appt_dt else "RESCHEDULED"
+        if success is True:     return "SUCCESS"
+        if success is False:    return "NOT_SUCCESS"
+        return ""
+
+    # Fetch all pages from VAPI
+    raw_entries = []
     try:
-        with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
-            raw_entries = _json.load(f)
-    except (FileNotFoundError, ValueError):
+        async with httpx.AsyncClient(timeout=30) as client:
+            page, limit = 1, 100
+            while True:
+                resp = await client.get(
+                    f"{VAPI_BASE}/v2/call",
+                    headers={"Authorization": f"Bearer {VAPI_API_KEY}"},
+                    params={"page": page, "limit": limit, "phoneNumberId": VAPI_PHONE_NUMBER_ID},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                batch = data.get("results", [])
+                if not batch: break
+                for call in batch:
+                    phone = (call.get("customer") or {}).get("number", "")
+                    if phone.replace(" ","").replace("-","") in {"+18132145068","18132145068","8132145068"}:
+                        continue
+                    ended_reason = call.get("endedReason", "")
+                    started_at   = call.get("startedAt", "") or call.get("createdAt", "")
+                    ended_at     = call.get("endedAt", "")
+                    created_at   = call.get("createdAt", "")
+                    call_started = "NO" if ended_reason.startswith("call.start.error") else "YES"
+                    duration_seconds = 0
+                    if call_started == "YES" and started_at and ended_at:
+                        try:
+                            from datetime import datetime as _dt
+                            s = _dt.fromisoformat(started_at.replace("Z", "+00:00"))
+                            e = _dt.fromisoformat(ended_at.replace("Z", "+00:00"))
+                            duration_seconds = max(0, int((e - s).total_seconds()))
+                        except Exception:
+                            pass
+                    vv      = (call.get("assistantOverrides") or {}).get("variableValues") or {}
+                    so      = (call.get("artifact") or {}).get("structuredOutputs") or {}
+                    summary = (so.get(SO_CALL_SUMMARY_ID) or {}).get("result", "")
+                    outcome = _parse_outcome(so)
+                    name    = vv.get("name", "") or phone
+                    raw_entries.append({
+                        "vapi_call_id":     call.get("id", ""),
+                        "name":             name,
+                        "phone":            phone,
+                        "property_address": vv.get("property_address", ""),
+                        "triggered_at":     created_at,
+                        "started_at":       started_at,
+                        "call_started":     call_started,
+                        "duration_seconds": duration_seconds,
+                        "ended_reason":     ended_reason,
+                        "ai_summary":       summary,
+                        "outcome":          outcome,
+                    })
+                meta = data.get("metadata", {})
+                total = meta.get("totalItems", 0)
+                per   = meta.get("itemsPerPage", limit)
+                cur   = meta.get("currentPage", page)
+                if cur * per >= total: break
+                page += 1
+    except Exception as ex:
         raw_entries = []
 
     def _to_et(ts):
