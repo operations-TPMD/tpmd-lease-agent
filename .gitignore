@@ -9,3 +9,4 @@ build/
 .vscode/
 .claude/
 ghl-mcp-server/
+call_log.json
