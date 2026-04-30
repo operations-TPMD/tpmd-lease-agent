@@ -835,6 +835,18 @@ def _check_call_history(contact_id: str) -> tuple[bool, str]:
     except (FileNotFoundError, ValueError):
         return False, ""
 
+    import zoneinfo as _zi
+    _today_et = datetime.now(_zi.ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+    # Already called today → skip (prevent double-calls on server restarts)
+    all_today = [
+        e for e in entries
+        if e.get("contact_id") == contact_id
+        and (e.get("triggered_at", "") or e.get("started_at", ""))[:10] == _today_et
+    ]
+    if all_today:
+        return True, f"already called today ({_today_et})"
+
     connected = [
         e for e in entries
         if e.get("contact_id") == contact_id and e.get("call_started") == "YES"
@@ -944,12 +956,12 @@ async def execute_action(
         return "\n".join(log_lines)
 
     if action == "trigger_voice_bot":
-        # Hard enforce: calls only allowed at 9-10 AM ET (scanner runs at 9 AM)
+        # Hard enforce: calls only before noon ET (morning only)
         import zoneinfo as _zi
         _et = _zi.ZoneInfo("America/New_York")
         _now_et = datetime.now(_et)
-        if not dry_run and _now_et.hour not in (9, 10):
-            log_lines.append(f"  ⏰ SKIP call for {name} — voice bot only runs at 9-10 AM ET (now {_now_et.strftime('%H:%M')} ET)")
+        if not dry_run and _now_et.hour >= 12:
+            log_lines.append(f"  ⏰ SKIP call for {name} — voice bot only runs before noon ET (now {_now_et.strftime('%H:%M')} ET)")
             return "\n".join(log_lines)
         # Check call history — skip if not interested or voicemail twice
         if not dry_run:
