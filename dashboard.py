@@ -41,6 +41,8 @@ from lease_agent import (
     STAGE_MAP, STAGE_NAME_TO_ID,
     LEASE_PIPELINE_ID, GHL_API_KEY, GHL_LOCATION_ID, OPENAI_API_KEY,
     ghl_headers, GHL_API_BASE,
+    VAPI_API_KEY, VAPI_PHONE_NUMBER_ID, VAPI_ASSISTANT_ID, VAPI_BASE,
+    CALL_LOG_FILE, _check_call_history,
 )
 from message_templates import TEMPLATES, format_template, get_templates_for_stage
 from response_engine import PeriodicScheduler, handle_inbound, is_business_hours
@@ -1049,6 +1051,180 @@ async def api_call_log():
     return JSONResponse({"calls": entries, "total": len(entries)})
 
 
+@app.get("/api/call-center")
+async def api_call_center():
+    """Return eligible leads enriched with call history for the Call Center panel."""
+    import json as _json
+    import zoneinfo as _zi
+
+    ELIGIBLE_STAGES = {
+        "Verification Auto-Sent", "ID Verified", "ID Rejected",
+        "Call: No Answer", "Call: Answered",
+    }
+
+    # Load call_log once
+    try:
+        with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
+            call_entries = _json.load(f)
+    except (FileNotFoundError, ValueError):
+        call_entries = []
+
+    eastern = _zi.ZoneInfo("America/New_York")
+
+    def _to_et_date(ts: str):
+        if not ts:
+            return None
+        try:
+            dt_utc = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return dt_utc.astimezone(eastern).strftime("%Y-%m-%d")
+        except Exception:
+            return ts[:10] if ts else None
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        opps = await get_all_opportunities(client)
+
+    leads_out = []
+    for opp in opps:
+        stage_id = opp.get("pipelineStageId", "")
+        stage_name = STAGE_MAP.get(stage_id, stage_id)
+        if stage_name not in ELIGIBLE_STAGES:
+            continue
+        if opp.get("status") == "lost":
+            continue
+
+        contact = opp.get("contact", {})
+        contact_id = opp.get("contactId", "")
+        opp_id = opp.get("id", "")
+        name = contact.get("name", "Unknown")
+        phone = contact.get("phone", "")
+
+        # Get calls for this contact, sorted newest first
+        contact_calls = sorted(
+            [e for e in call_entries if e.get("contact_id") == contact_id],
+            key=lambda x: x.get("triggered_at") or x.get("started_at") or "",
+            reverse=True,
+        )
+
+        last_call_date = None
+        last_call_status = None
+        ai_summary = None
+        if contact_calls:
+            latest = contact_calls[0]
+            last_call_date = _to_et_date(latest.get("triggered_at") or latest.get("started_at") or "")
+            last_call_status = latest.get("outcome") or latest.get("ended_reason") or None
+            # Find most recent call with a summary
+            for c in contact_calls:
+                if c.get("ai_summary"):
+                    ai_summary = c["ai_summary"]
+                    break
+
+        # Check skip logic
+        should_skip, skip_reason = _check_call_history(contact_id)
+
+        # can_call: not skipped AND not called today
+        _today_et = datetime.now(eastern).strftime("%Y-%m-%d")
+        called_today = any(
+            (e.get("triggered_at", "") or e.get("started_at", ""))[:10] == _today_et
+            and e.get("contact_id") == contact_id
+            for e in call_entries
+        )
+        can_call = not should_skip and not called_today
+
+        leads_out.append({
+            "contact_id": contact_id,
+            "opp_id": opp_id,
+            "name": name,
+            "phone": phone,
+            "stage": stage_name,
+            "last_call_date": last_call_date,
+            "last_call_status": last_call_status,
+            "ai_summary": ai_summary,
+            "skip_reason": skip_reason if should_skip else (f"already called today ({_today_et})" if called_today else ""),
+            "can_call": can_call,
+        })
+
+    leads_out.sort(key=lambda x: (not x["can_call"], x["name"]))
+    return JSONResponse({"leads": leads_out, "total": len(leads_out)})
+
+
+@app.post("/api/trigger-call")
+async def api_trigger_call(request: Request):
+    """Trigger a VAPI outbound call for a single lead."""
+    import json as _json
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"Invalid JSON: {e}"}, status_code=400)
+
+    contact_id = body.get("contact_id", "")
+    name = body.get("name", "")
+    phone = body.get("phone", "")
+    property_address = body.get("property_address", "")
+
+    if not phone:
+        return JSONResponse({"ok": False, "error": "phone is required"}, status_code=400)
+
+    # Normalize to E.164
+    normalized = phone.strip().replace(" ", "").replace("-", "")
+    if not normalized.startswith("+"):
+        normalized = "+1" + normalized.lstrip("1")
+
+    vapi_payload = {
+        "phoneNumberId": VAPI_PHONE_NUMBER_ID,
+        "assistantId": VAPI_ASSISTANT_ID,
+        "customer": {"number": normalized},
+        "assistantOverrides": {
+            "variableValues": {
+                "name": name,
+                "first_name": name.split()[0] if name else "",
+                "property_address": property_address,
+                "contact_id": contact_id,
+            }
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{VAPI_BASE}/call",
+                headers={"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"},
+                json=vapi_payload,
+            )
+        if resp.status_code not in (200, 201):
+            return JSONResponse({"ok": False, "error": f"VAPI error {resp.status_code}: {resp.text[:200]}"})
+
+        call_data = resp.json()
+        call_id = call_data.get("id", "")
+
+        # Append to call_log.json
+        try:
+            try:
+                with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
+                    entries = _json.load(f)
+            except (FileNotFoundError, ValueError):
+                entries = []
+            entries.append({
+                "contact_id": contact_id,
+                "name": name,
+                "phone": normalized,
+                "stage": "",
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
+                "vapi_call_id": call_id,
+            })
+            with open(CALL_LOG_FILE, "w", encoding="utf-8") as f:
+                _json.dump(entries, f, ensure_ascii=False, indent=2)
+        except Exception as log_err:
+            logger.warning(f"trigger-call: failed to write call log: {log_err}")
+
+        logger.info(f"trigger-call: called {name} ({normalized}), call_id={call_id}")
+        return JSONResponse({"ok": True, "call_id": call_id})
+
+    except Exception as e:
+        logger.error(f"trigger-call error: {e}", exc_info=True)
+        return JSONResponse({"ok": False, "error": str(e)[:300]})
+
+
 # ── Dashboard HTML ───────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -1312,6 +1488,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tc-send { background: var(--grad); color: white; border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 700; flex-shrink: 0; }
   .tc-send:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* Call Center panel toast */
+  .cc-toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: #1e293b; color: white; padding: 10px 20px; border-radius: 8px;
+    font-size: 13px; font-weight: 600; z-index: 9999;
+    opacity: 0; transition: opacity 0.3s ease; pointer-events: none;
+  }
+  .cc-toast.show { opacity: 1; }
+
   /* Recent interactions */
   .ri-section { margin: 12px 24px; border-radius: 10px; border: 1px solid var(--border); background: white; overflow: hidden; }
   .ri-header { padding: 10px 16px; background: white; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
@@ -1338,6 +1523,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <span class="scan-time" id="scanTime"></span>
+    <button class="btn btn-outline" style="color:#4ade80;border-color:rgba(74,222,128,0.5)" onclick="toggleCallCenter()">📞 Dial</button>
     <button class="btn btn-outline" style="color:#C4B5FD;border-color:rgba(196,181,253,0.5)" onclick="toggleCallLog()">📞 Call Log</button>
     <button class="btn btn-outline" style="color:#A5F3FC;border-color:rgba(165,243,252,0.5)" onclick="toggleTestChat()">🧪 Test Bot</button>
     <button class="btn btn-outline" style="color:white;border-color:rgba(255,255,255,0.4)" onclick="openTrainModal()">🎓 Train Bot</button>
@@ -1530,6 +1716,42 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="ri-no-data">No interactions yet. The bot will appear here when it handles inbound messages.</div>
   </div>
 </div>
+
+<!-- Call Center floating panel -->
+<div id="callCenterPanel" style="display:none;position:fixed;top:0;right:0;bottom:0;width:780px;background:white;border-left:1px solid var(--border);box-shadow:-4px 0 24px rgba(0,0,0,0.1);z-index:300;display:flex;flex-direction:column;transform:translateX(100%);transition:transform 0.3s ease">
+  <div style="background:linear-gradient(135deg,#059669,#0d9488);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="color:white;font-weight:700;font-size:15px">📞 Call Center</span>
+      <span id="callCenterCount" style="background:rgba(255,255,255,0.25);color:white;padding:1px 8px;border-radius:12px;font-size:12px;font-weight:600">0</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button onclick="triggerCalls()" id="ccCallSelectedBtn" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);color:white;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:600">📞 Call Selected</button>
+      <button onclick="loadCallCenter()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer">↻ Refresh</button>
+      <button onclick="toggleCallCenter()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:26px;height:26px;border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+    </div>
+  </div>
+  <div style="flex:1;overflow-y:auto">
+    <div id="callCenterLoading" style="text-align:center;padding:30px;color:#94a3b8;font-size:13px">Loading…</div>
+    <table id="callCenterTable" style="display:none;width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="background:#f0fdf4;border-bottom:2px solid #bbf7d0;position:sticky;top:0">
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46;width:32px">
+            <input type="checkbox" id="ccSelectAll" onchange="ccToggleAll(this.checked)" style="cursor:pointer">
+          </th>
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46">Name</th>
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46">Stage</th>
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46">Last Call</th>
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46">Status</th>
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46">AI Summary</th>
+          <th style="padding:10px 10px;text-align:left;font-weight:600;color:#065f46">Action</th>
+        </tr>
+      </thead>
+      <tbody id="callCenterRows"></tbody>
+    </table>
+    <div id="callCenterEmpty" style="display:none;text-align:center;padding:40px;color:#94a3b8;font-size:13px">No eligible leads found.</div>
+  </div>
+</div>
+<div class="cc-toast" id="ccToast"></div>
 
 <!-- Call Log floating panel -->
 <div id="callLogPanel" style="display:none;position:fixed;top:0;right:0;bottom:0;width:680px;background:white;border-left:1px solid var(--border);box-shadow:-4px 0 24px rgba(0,0,0,0.1);z-index:300;display:flex;flex-direction:column;transform:translateX(100%);transition:transform 0.3s ease">
@@ -2422,6 +2644,150 @@ async function riSubmitFeedback(riId, encodedMsg, encodedBot) {
     body: JSON.stringify({inbound: decodeURIComponent(encodedMsg), bot_message: decodeURIComponent(encodedBot), feedback, rating:'bad'})
   });
   el.innerHTML = '<div style="color:var(--green);font-size:11px;font-weight:600">✅ Rule added!</div>';
+}
+
+// ── Call Center ───────────────────────────────────────────────────────────────
+let callCenterOpen = false;
+let _ccLeads = [];
+
+function toggleCallCenter() {
+  callCenterOpen = !callCenterOpen;
+  const panel = document.getElementById('callCenterPanel');
+  panel.style.display = 'flex';
+  panel.style.transform = callCenterOpen ? 'translateX(0)' : 'translateX(100%)';
+  if (callCenterOpen) loadCallCenter();
+}
+
+async function loadCallCenter() {
+  const loading = document.getElementById('callCenterLoading');
+  const table = document.getElementById('callCenterTable');
+  const empty = document.getElementById('callCenterEmpty');
+  const rows = document.getElementById('callCenterRows');
+  const cnt = document.getElementById('callCenterCount');
+  const selectAll = document.getElementById('ccSelectAll');
+
+  loading.style.display = 'block';
+  table.style.display = 'none';
+  empty.style.display = 'none';
+  if (selectAll) selectAll.checked = false;
+
+  try {
+    const r = await fetch('/api/call-center');
+    const d = await r.json();
+    _ccLeads = d.leads || [];
+    cnt.textContent = _ccLeads.length;
+    loading.style.display = 'none';
+
+    if (!_ccLeads.length) { empty.style.display = 'block'; return; }
+
+    rows.innerHTML = _ccLeads.map(lead => {
+      const statusInfo = ccStatusBadge(lead.last_call_status);
+      const neverCalled = !lead.last_call_date;
+      const summaryText = lead.ai_summary
+        ? (lead.ai_summary.length > 80 ? lead.ai_summary.slice(0, 80) + '…' : lead.ai_summary)
+        : '—';
+      const canCall = lead.can_call;
+      const skipTitle = lead.skip_reason ? ` title="${esc(lead.skip_reason)}"` : '';
+      return `<tr style="border-bottom:1px solid #d1fae5;transition:background 0.15s" onmouseover="this.style.background='#f0fdf4'" onmouseout="this.style.background=''">
+        <td style="padding:8px 10px;text-align:center">
+          <input type="checkbox" id="cc_${lead.contact_id}" data-contact-id="${esc(lead.contact_id)}" data-name="${esc(lead.name)}" data-phone="${esc(lead.phone)}" data-stage="${esc(lead.stage)}" ${!canCall ? 'disabled' : ''} style="cursor:${canCall ? 'pointer' : 'not-allowed'};opacity:${canCall ? '1' : '0.4'}">
+        </td>
+        <td style="padding:8px 10px;font-weight:600;color:#065f46;font-size:12px">
+          ${esc(lead.name)}<br>
+          <span style="font-weight:400;color:#6b7280;font-size:10px">${esc(lead.phone||'')}</span>
+        </td>
+        <td style="padding:8px 10px">
+          <span class="badge ${sc(lead.stage)}" style="font-size:11px">${esc(lead.stage)}</span>
+        </td>
+        <td style="padding:8px 10px;color:#6b7280;font-size:11px;white-space:nowrap">
+          ${neverCalled
+            ? '<span style="color:#94a3b8">Never</span>'
+            : esc(lead.last_call_date)}
+        </td>
+        <td style="padding:8px 10px">
+          ${neverCalled
+            ? '<span style="background:#f1f5f9;color:#94a3b8;border:1px solid #e2e8f0;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600">Never called</span>'
+            : `<span style="background:${statusInfo.bg};color:${statusInfo.color};border:1px solid ${statusInfo.border};padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600">${esc(statusInfo.label)}</span>`}
+        </td>
+        <td style="padding:8px 10px;color:#6b7280;font-size:11px;max-width:160px">
+          ${lead.ai_summary
+            ? `<span title="${esc(lead.ai_summary)}" style="cursor:help">${esc(summaryText)}</span>`
+            : '<span style="color:#cbd5e1">—</span>'}
+        </td>
+        <td style="padding:8px 10px">
+          <button onclick="triggerCall('${esc(lead.contact_id)}','${esc(lead.name)}','${esc(lead.phone)}','')"
+            ${!canCall ? `disabled${skipTitle}` : ''}
+            style="background:${canCall ? 'linear-gradient(135deg,#059669,#0d9488)' : '#e5e7eb'};color:${canCall ? 'white' : '#9ca3af'};border:none;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:${canCall ? 'pointer' : 'not-allowed'};white-space:nowrap">
+            📞 Call
+          </button>
+          ${!canCall && lead.skip_reason ? `<div style="font-size:10px;color:#ef4444;margin-top:3px;max-width:100px">${esc(lead.skip_reason.slice(0,40))}</div>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+    table.style.display = 'table';
+  } catch(e) {
+    loading.textContent = 'Error loading call center: ' + e.message;
+  }
+}
+
+function ccStatusBadge(status) {
+  if (!status) return {bg:'#f1f5f9', color:'#94a3b8', border:'#e2e8f0', label:'Unknown'};
+  const s = status.toLowerCase();
+  if (s.startsWith('booked') || s === 'success') return {bg:'#dcfce7', color:'#16a34a', border:'#86efac', label: status};
+  if (s.includes('voicemail') || s.includes('no answer') || s.includes('silence') || s.includes('not_success')) return {bg:'#fef3c7', color:'#d97706', border:'#fcd34d', label: status};
+  if (s.includes('not interested') || s.includes('cancelled')) return {bg:'#fee2e2', color:'#dc2626', border:'#fca5a5', label: status};
+  return {bg:'#f1f5f9', color:'#64748b', border:'#e2e8f0', label: status};
+}
+
+function ccToggleAll(checked) {
+  document.querySelectorAll('#callCenterRows input[type=checkbox]:not(:disabled)').forEach(cb => cb.checked = checked);
+}
+
+async function triggerCall(contactId, name, phone, propertyAddress) {
+  const btn = document.querySelector(`#callCenterRows button[onclick*="${contactId}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Calling…'; }
+
+  try {
+    const r = await fetch('/api/trigger-call', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({contact_id: contactId, name, phone, property_address: propertyAddress}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      ccShowToast(`✅ Call triggered for ${name}`);
+      setTimeout(() => loadCallCenter(), 1500);
+    } else {
+      ccShowToast(`❌ Failed: ${d.error || 'unknown error'}`, true);
+      if (btn) { btn.disabled = false; btn.textContent = '📞 Call'; }
+    }
+  } catch(e) {
+    ccShowToast(`❌ Error: ${e.message}`, true);
+    if (btn) { btn.disabled = false; btn.textContent = '📞 Call'; }
+  }
+}
+
+async function triggerCalls() {
+  const checked = [...document.querySelectorAll('#callCenterRows input[type=checkbox]:checked')];
+  if (!checked.length) { ccShowToast('No leads selected', true); return; }
+  if (!confirm(`Trigger calls to ${checked.length} lead(s)?`)) return;
+
+  for (let i = 0; i < checked.length; i++) {
+    const cb = checked[i];
+    const contactId = cb.dataset.contactId;
+    const name = cb.dataset.name;
+    const phone = cb.dataset.phone;
+    await triggerCall(contactId, name, phone, '');
+    if (i < checked.length - 1) await new Promise(r => setTimeout(r, 1200));
+  }
+}
+
+function ccShowToast(msg, isError) {
+  const t = document.getElementById('ccToast');
+  t.textContent = msg;
+  t.style.background = isError ? '#7f1d1d' : '#064e3b';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3500);
 }
 
 // ── Conversation Review Modal ──────────────────────────────────────────────
