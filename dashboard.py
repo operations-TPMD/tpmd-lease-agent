@@ -865,9 +865,9 @@ async def api_bot_feedback(request: Request):
 
 @app.post("/api/vapi-webhook")
 async def api_vapi_webhook(request: Request):
-    """Receive VAPI end-of-call report and write AI Summary to GHL + call_log.json."""
+    """Receive VAPI end-of-call report, write AI Summary to GHL, update pipeline stage."""
     import json as _json
-    from lease_agent import CALL_LOG_FILE, parse_custom_fields, ghl_post, ghl_get, CUSTOM_FIELDS
+    from lease_agent import CALL_LOG_FILE, parse_custom_fields, ghl_post, ghl_get, CUSTOM_FIELDS, STAGE_NAME_TO_ID
     try:
         body = await request.json()
         msg_type = body.get("type", "")
@@ -880,6 +880,7 @@ async def api_vapi_webhook(request: Request):
             body.get("call", {}).get("customer", {}).get("number", "")
         )
         call_started_at = body.get("startedAt", "") or body.get("call", {}).get("startedAt", "")
+        ended_reason = body.get("endedReason", "") or body.get("call", {}).get("endedReason", "")
 
         if not customer_phone:
             return JSONResponse({"status": "no_phone"})
@@ -888,6 +889,13 @@ async def api_vapi_webhook(request: Request):
         phone = customer_phone.strip()
         if not phone.startswith("+"):
             phone = "+" + phone
+
+        # Determine call outcome for stage update
+        # call_started = False means the call never connected (error before dial)
+        call_connected = not ended_reason.startswith("call.start.error") if ended_reason else bool(call_started_at)
+        # "Answered" = call connected AND not immediately silent/voicemail
+        no_answer_reasons = {"customer-did-not-answer", "silence-timed-out", "voicemail"}
+        lead_answered = call_connected and ended_reason not in no_answer_reasons
 
         async with httpx.AsyncClient(timeout=20) as client:
             # Find contact by phone
@@ -916,7 +924,6 @@ async def api_vapi_webhook(request: Request):
                 if fname == "ai_summary":
                     ai_summary_field_id = fid
                     break
-            # Also try to detect from existing custom fields
             if not ai_summary_field_id:
                 for cf in contact.get("customFields", []):
                     fkey = (cf.get("fieldKey") or cf.get("name") or "").lower().replace(" ", "_")
@@ -929,35 +936,54 @@ async def api_vapi_webhook(request: Request):
                     "customFields": [{"id": ai_summary_field_id, "field_value": summary}]
                 })
 
-            # Update call_log.json entry for this contact
-            try:
-                with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
-                    entries = _json.load(f)
-            except (FileNotFoundError, ValueError):
-                entries = []
+            # ── Update pipeline stage based on call outcome ───────────────────
+            stage_updated = None
+            if call_connected:
+                target_stage = "Call: Answered" if lead_answered else "Call: No Answer"
+                target_stage_id = STAGE_NAME_TO_ID.get(target_stage)
+                if target_stage_id:
+                    # Find their opportunity
+                    try:
+                        opps_resp = await client.get(
+                            f"{GHL_API_BASE}/opportunities/search",
+                            headers=ghl_headers(),
+                            params={
+                                "location_id": GHL_LOCATION_ID,
+                                "pipeline_id": "DVv60aGSOc7XtIofy4Pn",
+                                "contact_id": contact_id,
+                                "limit": 1,
+                            },
+                        )
+                        if opps_resp.status_code == 200:
+                            opps_data = opps_resp.json().get("opportunities", [])
+                            if opps_data:
+                                opp_id = opps_data[0].get("id", "")
+                                current_stage = STAGE_MAP.get(opps_data[0].get("pipelineStageId", ""), "")
+                                # Only update if not in a terminal / later stage
+                                terminal = {"Leased / Won", "Lost", "Application Sent", "Showing Scheduled", "Call: Answered"}
+                                if current_stage not in terminal or (target_stage == "Call: Answered" and current_stage == "Call: No Answer"):
+                                    patch = await client.patch(
+                                        f"{GHL_API_BASE}/opportunities/{opp_id}",
+                                        headers=ghl_headers(),
+                                        json={"pipelineStageId": target_stage_id},
+                                    )
+                                    if patch.status_code in (200, 201):
+                                        stage_updated = target_stage
+                                        logger.info(f"VAPI webhook: moved {name} → {target_stage}")
+                                    else:
+                                        logger.warning(f"VAPI webhook: stage update failed {patch.status_code}: {patch.text[:100]}")
+                    except Exception as stage_err:
+                        logger.warning(f"VAPI webhook: stage update error: {stage_err}")
 
-            # Update existing entry or append
-            found = False
-            for e in entries:
-                if e.get("contact_id") == contact_id:
-                    e["ai_summary"] = summary
-                    e["call_ended_at"] = call_started_at
-                    found = True
-                    break
-            if not found:
-                entries.append({
-                    "contact_id": contact_id,
-                    "name": name,
-                    "stage": "",
-                    "triggered_at": call_started_at or datetime.now(timezone.utc).isoformat(),
-                    "ai_summary": summary,
-                })
-
-            with open(CALL_LOG_FILE, "w", encoding="utf-8") as f:
-                _json.dump(entries, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"VAPI webhook: saved summary for {name} ({contact_id})")
-            return JSONResponse({"status": "ok", "contact_id": contact_id, "name": name})
+            logger.info(f"VAPI webhook: processed {name} ({contact_id}), answered={lead_answered}, stage_updated={stage_updated}")
+            return JSONResponse({
+                "status": "ok",
+                "contact_id": contact_id,
+                "name": name,
+                "call_connected": call_connected,
+                "lead_answered": lead_answered,
+                "stage_updated": stage_updated,
+            })
 
     except Exception as e:
         logger.error(f"VAPI webhook error: {e}", exc_info=True)
@@ -1127,8 +1153,7 @@ async def api_call_log():
 
 @app.get("/api/call-center")
 async def api_call_center():
-    """Return eligible leads enriched with call history for the Call Center panel."""
-    import json as _json
+    """Return eligible leads enriched with call history — fetches live from VAPI API."""
     import zoneinfo as _zi
 
     ELIGIBLE_STAGES = {
@@ -1136,14 +1161,18 @@ async def api_call_center():
         "Call: No Answer", "Call: Answered",
     }
 
-    # Load call_log once
-    try:
-        with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
-            call_entries = _json.load(f)
-    except (FileNotFoundError, ValueError):
-        call_entries = []
+    SO_CALL_SUMMARY_ID    = "db31e82f-c498-443f-9e08-5cd2e43b3113"
+    SO_SUCCESS_EVAL_ID    = "d45f09c9-847c-4bd5-8cd5-7ba63b3df883"
+    SO_APPT_BOOKED_ID     = "4030f8dc-4f0c-452c-a422-b6e5157e0c68"
+    SO_APPT_CANCELLED_ID  = "5da34a47-1843-4a3a-8e1e-fc69d92f3cb5"
+    SO_APPT_RESCHEDULED_ID= "8708977d-98ea-4f4b-ab96-a6ef4a719a20"
 
     eastern = _zi.ZoneInfo("America/New_York")
+    TEST_NUMBERS = {"+18132145068", "18132145068", "8132145068"}
+
+    def _norm_phone(p: str) -> str:
+        """Normalize to digits-only for matching."""
+        return (p or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "").lstrip("+")
 
     def _to_et_date(ts: str):
         if not ts:
@@ -1154,10 +1183,111 @@ async def api_call_center():
         except Exception:
             return ts[:10] if ts else None
 
+    def _parse_outcome(so):
+        if not so: return ""
+        booked      = so.get(SO_APPT_BOOKED_ID, {}).get("result")
+        cancelled   = so.get(SO_APPT_CANCELLED_ID, {}).get("result")
+        rescheduled = so.get(SO_APPT_RESCHEDULED_ID, {}).get("result")
+        success     = so.get(SO_SUCCESS_EVAL_ID, {}).get("result")
+        if booked is True:      return "BOOKED"
+        if cancelled is True:   return "CANCELLED"
+        if rescheduled is True: return "RESCHEDULED"
+        if success is True:     return "SUCCESS"
+        if success is False:    return "NOT_SUCCESS"
+        return ""
+
+    def _call_label(call: dict) -> str:
+        """Human-readable call status label."""
+        outcome = call.get("outcome", "")
+        ended_reason = call.get("ended_reason", "")
+        call_started = call.get("call_started", "YES")
+        summary_lower = (call.get("ai_summary", "") or "").lower()
+
+        if call_started == "NO":
+            return "Did not connect"
+        if outcome == "BOOKED":
+            return "Booked"
+        if outcome == "CANCELLED":
+            return "Cancelled"
+        if outcome == "RESCHEDULED":
+            return "Rescheduled"
+        if outcome == "SUCCESS":
+            return "Success"
+        if outcome == "NOT_SUCCESS":
+            if any(w in summary_lower for w in ["voicemail", "no answer", "left message", "mailbox"]):
+                return "Voicemail"
+            if any(w in summary_lower for w in ["not interested", "no longer", "do not call", "wrong number"]):
+                return "Not interested"
+            return "Not successful"
+        if ended_reason in ("silence-timed-out", "customer-did-not-answer"):
+            return "Voicemail / No answer"
+        if call.get("ai_summary"):
+            return "Spoke"
+        return "Unknown"
+
+    # ── Fetch all calls from VAPI (live, paginated) ──────────────────────────
+    # phone_norm → list of call dicts, sorted newest-first
+    phone_calls: dict[str, list] = {}
+    try:
+        async with httpx.AsyncClient(timeout=30) as vapi_client:
+            page, limit = 1, 100
+            while True:
+                resp = await vapi_client.get(
+                    f"{VAPI_BASE}/v2/call",
+                    headers={"Authorization": f"Bearer {VAPI_API_KEY}"},
+                    params={"page": page, "limit": limit, "phoneNumberId": VAPI_PHONE_NUMBER_ID},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                batch = data.get("results", [])
+                if not batch:
+                    break
+                for call in batch:
+                    raw_phone = (call.get("customer") or {}).get("number", "")
+                    norm = _norm_phone(raw_phone)
+                    if norm in {"18132145068", "8132145068"}:
+                        continue
+                    ended_reason = call.get("endedReason", "")
+                    started_at   = call.get("startedAt", "") or ""
+                    created_at   = call.get("createdAt", "") or ""
+                    call_started = "NO" if ended_reason.startswith("call.start.error") else "YES"
+                    so      = (call.get("artifact") or {}).get("structuredOutputs") or {}
+                    summary = (so.get(SO_CALL_SUMMARY_ID) or {}).get("result", "")
+                    outcome = _parse_outcome(so)
+                    entry = {
+                        "vapi_call_id": call.get("id", ""),
+                        "triggered_at": created_at,
+                        "started_at":   started_at,
+                        "call_started": call_started,
+                        "ended_reason": ended_reason,
+                        "ai_summary":   summary,
+                        "outcome":      outcome,
+                    }
+                    phone_calls.setdefault(norm, []).append(entry)
+                meta = data.get("metadata", {})
+                total = meta.get("totalItems", 0)
+                per   = meta.get("itemsPerPage", limit)
+                cur   = meta.get("currentPage", page)
+                if cur * per >= total:
+                    break
+                page += 1
+        # Sort each phone's calls newest-first
+        for norm in phone_calls:
+            phone_calls[norm].sort(
+                key=lambda c: c.get("triggered_at") or c.get("started_at") or "",
+                reverse=True,
+            )
+    except Exception as ex:
+        logger.warning(f"call-center: VAPI fetch failed: {ex}")
+        phone_calls = {}
+
+    # ── Fetch eligible opportunities ─────────────────────────────────────────
     async with httpx.AsyncClient(timeout=30) as client:
         opps = await get_all_opportunities(client)
 
+    _today_et = datetime.now(eastern).strftime("%Y-%m-%d")
     leads_out = []
+
     for opp in opps:
         stage_id = opp.get("pipelineStageId", "")
         stage_name = STAGE_MAP.get(stage_id, stage_id)
@@ -1171,13 +1301,17 @@ async def api_call_center():
         opp_id = opp.get("id", "")
         name = contact.get("name", "Unknown")
         phone = contact.get("phone", "")
+        norm_lead = _norm_phone(phone)
 
-        # Get calls for this contact, sorted newest first
-        contact_calls = sorted(
-            [e for e in call_entries if e.get("contact_id") == contact_id],
-            key=lambda x: x.get("triggered_at") or x.get("started_at") or "",
-            reverse=True,
-        )
+        # Match calls by normalized phone (strip leading 1 for US numbers)
+        def _match_calls(norm: str):
+            # Try exact, then strip/add leading 1
+            if norm in phone_calls:
+                return phone_calls[norm]
+            alt = norm[1:] if norm.startswith("1") and len(norm) == 11 else "1" + norm
+            return phone_calls.get(alt, [])
+
+        contact_calls = _match_calls(norm_lead)
 
         last_call_date = None
         last_call_status = None
@@ -1185,24 +1319,52 @@ async def api_call_center():
         if contact_calls:
             latest = contact_calls[0]
             last_call_date = _to_et_date(latest.get("triggered_at") or latest.get("started_at") or "")
-            last_call_status = latest.get("outcome") or latest.get("ended_reason") or None
-            # Find most recent call with a summary
+            last_call_status = _call_label(latest)
             for c in contact_calls:
                 if c.get("ai_summary"):
                     ai_summary = c["ai_summary"]
                     break
 
-        # Check skip logic
-        should_skip, skip_reason = _check_call_history(contact_id)
+        # ── Skip logic (inline, no call_log.json dependency) ─────────────────
+        skip_reason = ""
+        should_skip = False
 
-        # can_call: not skipped AND not called today
-        _today_et = datetime.now(eastern).strftime("%Y-%m-%d")
+        # 1. Called today?
         called_today = any(
-            (e.get("triggered_at", "") or e.get("started_at", ""))[:10] == _today_et
-            and e.get("contact_id") == contact_id
-            for e in call_entries
+            (_to_et_date(c.get("triggered_at") or c.get("started_at") or "") == _today_et)
+            for c in contact_calls
         )
-        can_call = not should_skip and not called_today
+        if called_today:
+            should_skip = True
+            skip_reason = f"Already called today ({_today_et})"
+
+        # 2. Not interested? (any connected call with not-interested summary)
+        if not should_skip:
+            for c in contact_calls:
+                if c.get("call_started") == "YES" and c.get("ai_summary"):
+                    sl = c["ai_summary"].lower()
+                    if any(w in sl for w in ["not interested", "do not call", "no longer interested", "wrong number", "stop calling"]):
+                        should_skip = True
+                        skip_reason = "Lead not interested — do not call"
+                        break
+
+        # 3. Voicemail 2+ consecutive times?
+        if not should_skip:
+            connected = [c for c in contact_calls if c.get("call_started") == "YES"]
+            if len(connected) >= 2:
+                def _is_voicemail(c):
+                    sl = (c.get("ai_summary") or "").lower()
+                    er = c.get("ended_reason", "")
+                    return (
+                        any(w in sl for w in ["voicemail", "no answer", "left message", "mailbox"])
+                        or er in ("silence-timed-out", "customer-did-not-answer")
+                        or c.get("outcome") == "NOT_SUCCESS"
+                    )
+                if _is_voicemail(connected[0]) and _is_voicemail(connected[1]):
+                    should_skip = True
+                    skip_reason = "Voicemail 2x in a row — pausing calls"
+
+        can_call = not should_skip
 
         leads_out.append({
             "contact_id": contact_id,
@@ -1213,7 +1375,7 @@ async def api_call_center():
             "last_call_date": last_call_date,
             "last_call_status": last_call_status,
             "ai_summary": ai_summary,
-            "skip_reason": skip_reason if should_skip else (f"already called today ({_today_et})" if called_today else ""),
+            "skip_reason": skip_reason,
             "can_call": can_call,
         })
 
