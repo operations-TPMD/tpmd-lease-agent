@@ -1282,19 +1282,38 @@ async def api_call_center():
         phone_calls = {}
 
     # ── Fetch eligible opportunities ─────────────────────────────────────────
+    from lease_agent import parse_custom_fields as _parse_cf
+
     async with httpx.AsyncClient(timeout=30) as client:
         opps = await get_all_opportunities(client)
+
+        # Pre-filter eligible leads, then fetch full contact for each to get custom fields
+        eligible_opps = [
+            opp for opp in opps
+            if STAGE_MAP.get(opp.get("pipelineStageId", ""), opp.get("pipelineStageId", "")) in ELIGIBLE_STAGES
+            and opp.get("status") != "lost"
+        ]
+
+        # Fetch full contact details for each eligible lead (custom fields incl. property_address)
+        contact_custom: dict[str, dict] = {}
+        for opp in eligible_opps:
+            cid = opp.get("contactId", "")
+            if not cid or cid in contact_custom:
+                continue
+            try:
+                cr = await client.get(f"{GHL_API_BASE}/contacts/{cid}", headers=ghl_headers())
+                if cr.status_code == 200:
+                    cdata = cr.json().get("contact", cr.json())
+                    contact_custom[cid] = _parse_cf(cdata.get("customFields", []))
+            except Exception:
+                contact_custom[cid] = {}
 
     _today_et = datetime.now(eastern).strftime("%Y-%m-%d")
     leads_out = []
 
-    for opp in opps:
+    for opp in eligible_opps:
         stage_id = opp.get("pipelineStageId", "")
         stage_name = STAGE_MAP.get(stage_id, stage_id)
-        if stage_name not in ELIGIBLE_STAGES:
-            continue
-        if opp.get("status") == "lost":
-            continue
 
         contact = opp.get("contact", {})
         contact_id = opp.get("contactId", "")
@@ -1366,12 +1385,16 @@ async def api_call_center():
 
         can_call = not should_skip
 
+        # Get property_address from fetched custom fields
+        property_address = contact_custom.get(contact_id, {}).get("property_address", "")
+
         leads_out.append({
             "contact_id": contact_id,
             "opp_id": opp_id,
             "name": name,
             "phone": phone,
             "stage": stage_name,
+            "property_address": property_address,
             "last_call_date": last_call_date,
             "last_call_status": last_call_status,
             "ai_summary": ai_summary,
@@ -1406,6 +1429,23 @@ async def api_trigger_call(request: Request):
     if not normalized.startswith("+"):
         normalized = "+1" + normalized.lstrip("1")
 
+    # If property_address is missing, fetch it from GHL contact custom fields
+    if not property_address and contact_id:
+        try:
+            from lease_agent import parse_custom_fields as _parse_cf
+            async with httpx.AsyncClient(timeout=15) as _gc:
+                _cr = await _gc.get(
+                    f"{GHL_API_BASE}/contacts/{contact_id}",
+                    headers=ghl_headers(),
+                )
+                if _cr.status_code == 200:
+                    _contact_data = _cr.json().get("contact", _cr.json())
+                    _custom = _parse_cf(_contact_data.get("customFields", []))
+                    property_address = _custom.get("property_address", "")
+                    logger.info(f"trigger-call: fetched property_address='{property_address}' for {contact_id}")
+        except Exception as _ge:
+            logger.warning(f"trigger-call: could not fetch contact details: {_ge}")
+
     vapi_payload = {
         "phoneNumberId": VAPI_PHONE_NUMBER_ID,
         "assistantId": VAPI_ASSISTANT_ID,
@@ -1433,28 +1473,8 @@ async def api_trigger_call(request: Request):
         call_data = resp.json()
         call_id = call_data.get("id", "")
 
-        # Append to call_log.json
-        try:
-            try:
-                with open(CALL_LOG_FILE, "r", encoding="utf-8") as f:
-                    entries = _json.load(f)
-            except (FileNotFoundError, ValueError):
-                entries = []
-            entries.append({
-                "contact_id": contact_id,
-                "name": name,
-                "phone": normalized,
-                "stage": "",
-                "triggered_at": datetime.now(timezone.utc).isoformat(),
-                "vapi_call_id": call_id,
-            })
-            with open(CALL_LOG_FILE, "w", encoding="utf-8") as f:
-                _json.dump(entries, f, ensure_ascii=False, indent=2)
-        except Exception as log_err:
-            logger.warning(f"trigger-call: failed to write call log: {log_err}")
-
-        logger.info(f"trigger-call: called {name} ({normalized}), call_id={call_id}")
-        return JSONResponse({"ok": True, "call_id": call_id})
+        logger.info(f"trigger-call: called {name} ({normalized}), property='{property_address}', call_id={call_id}")
+        return JSONResponse({"ok": True, "call_id": call_id, "property_address": property_address})
 
     except Exception as e:
         logger.error(f"trigger-call error: {e}", exc_info=True)
