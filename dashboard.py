@@ -2957,7 +2957,7 @@ async function loadCallCenter() {
       const skipTitle = lead.skip_reason ? ` title="${esc(lead.skip_reason)}"` : '';
       return `<tr style="border-bottom:1px solid #d1fae5;transition:background 0.15s" onmouseover="this.style.background='#f0fdf4'" onmouseout="this.style.background=''">
         <td style="padding:8px 10px;text-align:center">
-          <input type="checkbox" id="cc_${lead.contact_id}" data-contact-id="${esc(lead.contact_id)}" data-name="${esc(lead.name)}" data-phone="${esc(lead.phone)}" data-stage="${esc(lead.stage)}" data-property-address="${esc(lead.property_address||'')}" ${!canCall ? 'disabled' : ''} style="cursor:${canCall ? 'pointer' : 'not-allowed'};opacity:${canCall ? '1' : '0.4'}">
+          <input type="checkbox" id="cc_${lead.contact_id}" data-contact-id="${esc(lead.contact_id)}" data-name="${esc(lead.name)}" data-phone="${esc(lead.phone)}" data-stage="${esc(lead.stage)}" data-property-address="${esc(lead.property_address||'')}" style="cursor:pointer">
         </td>
         <td style="padding:8px 10px;font-weight:600;color:#065f46;font-size:12px">
           ${esc(lead.name)}<br>
@@ -2983,11 +2983,10 @@ async function loadCallCenter() {
         </td>
         <td style="padding:8px 10px">
           <button onclick="triggerCall('${esc(lead.contact_id)}','${esc(lead.name)}','${esc(lead.phone)}','${esc(lead.property_address||'')}')"
-            ${!canCall ? `disabled${skipTitle}` : ''}
-            style="background:${canCall ? 'linear-gradient(135deg,#059669,#0d9488)' : '#e5e7eb'};color:${canCall ? 'white' : '#9ca3af'};border:none;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:${canCall ? 'pointer' : 'not-allowed'};white-space:nowrap">
+            style="background:linear-gradient(135deg,#059669,#0d9488);color:white;border:none;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">
             📞 Call
           </button>
-          ${!canCall && lead.skip_reason ? `<div style="font-size:10px;color:#ef4444;margin-top:3px;max-width:100px">${esc(lead.skip_reason.slice(0,40))}</div>` : ''}
+          ${lead.skip_reason ? `<div style="font-size:10px;color:#ef4444;margin-top:3px;max-width:110px">⚠️ ${esc(lead.skip_reason.slice(0,50))}</div>` : ''}
         </td>
       </tr>`;
     }).join('');
