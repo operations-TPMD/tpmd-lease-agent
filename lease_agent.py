@@ -435,22 +435,14 @@ RULES:
     Step 2: If the backup code was already sent and still doesn't work, OR no backup code exists, OR the lead reports failure a second time → action must be "escalate_to_team". Do NOT repeat any code that has already failed.
 16. If the lead reports the same problem 2+ times with no resolution → action must be "escalate_to_team".
 17. AI Summary: If "AI Summary" is provided and the lead has responded but has no showing scheduled → read the summary, address the specific concern or objection raised in it. Don't ignore the summary.
-18. Voice bot calls (Verification Auto-Sent, ID Verified, ID Rejected): ONLY use action "trigger_voice_bot" for leads in these stages when ALL are true:
-    - No showing_date scheduled yet
-    - Last inbound message is 2+ days old (or no inbound at all, only outbound from bot)
-    - Lead is not in DND
-    - Do NOT call more than once per day for the same lead (check if tag "call_for_showing" was already added today)
-    - AI Summary does NOT indicate the lead is not interested, not looking, or asked not to be contacted (if summary says "not interested", "no longer looking", "do not call", "wrong number", "stop" → skip or move to Lost instead)
-    - If AI Summary says "voicemail", "no answer", "left message" → still eligible to call again
-    - If AI Summary says "interested", "wants to schedule", "asked question" → send SMS to follow up instead of calling again
-    - For ID Rejected leads, naturally bring up ID resubmission during the call conversation if needed
+18. Voice bot calls are handled MANUALLY via the dashboard — NEVER use action "trigger_voice_bot" in automated scans. For leads in Verification Auto-Sent / ID Verified / ID Rejected / Call: No Answer stages, send an SMS instead.
 19. ID reminder after voice bot scheduling: If stage is "Showing Scheduled" AND id_status is "pending" or empty AND no message about ID/verification has been sent recently → send a gentle reminder that they need to complete verification to receive the property access code.
 
 {custom_rules}
 
 STAGE ACTIONS:
 - New Lead / Call: No Answer / Call: Answered → if no showing_date: send SMS to book showing.
-- Verification Auto-Sent / ID Verified / ID Rejected → if no showing_date AND last inbound is 2+ days ago (or never) AND not DND AND AI Summary doesn't show disinterest → action must be "trigger_voice_bot". If AI Summary shows interest/question → send SMS. If AI Summary shows not interested → skip or Lost.
+- Verification Auto-Sent / ID Verified / ID Rejected → send SMS only. Voice bot calls are triggered manually from the dashboard — never use trigger_voice_bot here.
 - Showing Scheduled (not yet passed): TODAY or TOMORROW → reminder with address + lock code. 2+ days away → skip. If id_status is pending/empty → add ID reminder.
 - After Showing (Days Since Showing >= 0):
   * 0 attempts: "How was the showing?" warm, no application link yet
@@ -477,7 +469,7 @@ LINKS:
 
 RESPOND WITH EXACTLY THIS JSON:
 {
-  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "escalate_to_team" | "trigger_voice_bot" | "skip",
+  "action": "send_sms" | "update_stage" | "send_sms_and_update_stage" | "create_appointment" | "escalate_to_team" | "skip",
   "message": "SMS text to lead (for escalate_to_team: apologetic message to lead saying team will call them shortly)",
   "new_stage": "Stage Name or empty string",
   "appointment_date": "YYYY-MM-DD or empty string",
@@ -956,13 +948,9 @@ async def execute_action(
         return "\n".join(log_lines)
 
     if action == "trigger_voice_bot":
-        # Hard enforce: calls only before noon ET (morning only)
-        import zoneinfo as _zi
-        _et = _zi.ZoneInfo("America/New_York")
-        _now_et = datetime.now(_et)
-        if not dry_run and _now_et.hour >= 12:
-            log_lines.append(f"  ⏰ SKIP call for {name} — voice bot only runs before noon ET (now {_now_et.strftime('%H:%M')} ET)")
-            return "\n".join(log_lines)
+        # Voice bot calls are MANUAL ONLY — blocked from the automated scanner
+        log_lines.append(f"  🚫 BLOCKED auto-call for {name} — voice bot is manual-only (use Call Center in dashboard)")
+        return "\n".join(log_lines)
         # Check call history — skip if not interested or voicemail twice
         if not dry_run:
             _skip, _skip_reason = _check_call_history(lead.get("contact_id", ""))
