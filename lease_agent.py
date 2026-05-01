@@ -608,6 +608,39 @@ def _build_user_prompt(lead_context: dict) -> str:
     else:
         property_info = lead_context.get("property_summary") or ""
 
+    # ── Pre-compute covered topics from outbound messages ─────────────────────
+    # This tells Claude explicitly what has already been said so it doesn't repeat.
+    outbound_bodies = [m["body"].lower() for m in lead_context.get("recent_messages", []) if m["direction"] == "outbound"]
+
+    def _topic_check(keywords, bodies):
+        return any(any(kw in b for kw in keywords) for b in bodies)
+
+    covered = []
+    if _topic_check(["schedule", "book", "showing", "tpmd.io", "calendar", "appointment", "http"], outbound_bodies):
+        covered.append("✅ Scheduling/showing link already sent")
+    if _topic_check(["$", "rent", "deposit", "fee", "admin", "per month", "/mo"], outbound_bodies):
+        covered.append("✅ Rent/fees already mentioned")
+    if _topic_check(["pet", "dog", "cat", "animal"], outbound_bodies):
+        covered.append("✅ Pet policy already mentioned")
+    if _topic_check(["util", "water", "trash", "electric", "included"], outbound_bodies):
+        covered.append("✅ Utilities already mentioned")
+    if _topic_check(["bedroom", "bath", "sq ft", "sqft", "size", "layout", "floor plan"], outbound_bodies):
+        covered.append("✅ Property size/layout already mentioned")
+    if _topic_check(["neighborhood", "location", "nearby", "close to", "minutes from", "beach", "mall", "i-275", "us-19"], outbound_bodies):
+        covered.append("✅ Location/neighborhood already mentioned")
+    if _topic_check(["apply", "application", "appfolio", "apply/"], outbound_bodies):
+        covered.append("✅ Application link already sent")
+    if _topic_check(["lock", "code", "access", "lockbox", "keypad", "door"], outbound_bodies):
+        covered.append("✅ Access/lock code already mentioned")
+    if _topic_check(["second month", "half off", "special", "offer", "promo", "discount"], outbound_bodies):
+        covered.append("✅ Special offer/promotion already mentioned")
+    if _topic_check(["how was", "how did", "enjoy", "thoughts on", "feedback", "experience"], outbound_bodies):
+        covered.append("✅ Post-showing feedback already requested")
+    if not covered and outbound_bodies:
+        covered.append("(No specific topics detected in prior outbound messages — check history below)")
+
+    covered_block = "\n".join(covered) if covered else "(No prior outbound messages)"
+
     prompt = f"""Analyze this lead and decide the best action:
 
 Lead: {lead_context['name']}
@@ -641,6 +674,11 @@ Days Since Last Inbound (or Creation if Never): {days_since_inbound if days_sinc
 Outbound SMS Sent Today: {outbound_today_count}
 Consecutive Unanswered Outbound (in a row, no reply): {consecutive_unanswered}
 Current Date (ET): {current_date_et}
+
+WHAT HAS ALREADY BEEN COVERED IN THIS CONVERSATION (do NOT repeat these topics):
+{covered_block}
+
+⛔ If your proposed message covers any topic marked ✅ above — and the lead has NOT asked about it again — action must be "skip". Find a genuinely different angle or skip entirely.
 
 PROPERTY DETAILS (use this to answer any questions about rent, utilities, pets, fees, availability, etc.):
 {property_info if property_info else '(No property details available)'}
@@ -1092,12 +1130,12 @@ async def process_lead(client: httpx.AsyncClient, opp: dict, dry_run: bool, unav
             def _keywords(text):
                 return {w for w in _re.findall(r'\b\w{4,}\b', text) if w not in _stop}
             proposed_kw = _keywords(" ".join(proposed))
-            for prev_body in _outbound_msgs[:5]:  # check against last 5 outbound
+            for prev_body in _outbound_msgs[:10]:  # check against last 10 outbound
                 prev_kw = _keywords(prev_body)
                 if not proposed_kw or not prev_kw:
                     continue
                 overlap = len(proposed_kw & prev_kw) / len(proposed_kw)
-                if overlap > 0.65:  # >65% same keywords → likely a repeat
+                if overlap > 0.50:  # >50% same keywords → likely a repeat
                     return f"  ⏭ SKIP {lead['name']} — proposed message too similar to a recent outbound ({overlap:.0%} keyword overlap)"
 
     return await execute_action(client, lead, decision, dry_run)
