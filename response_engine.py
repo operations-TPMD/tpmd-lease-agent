@@ -184,7 +184,7 @@ async def handle_inbound(contact_id: str, message_body: str = "", dry_run: bool 
             stage_name = STAGE_MAP.get(opp.get("pipelineStageId", ""), "Unknown")
 
             # Skip terminal stages
-            if stage_name in ("Leased / Won", "Lost") or opp.get("status") == "lost":
+            if stage_name in ("Leased / Won", "Lost", "Application Sent") or opp.get("status") == "lost":
                 return {"status": "skipped", "reason": f"Lead in {stage_name}"}
 
             lead = await enrich_lead(client, opp)
