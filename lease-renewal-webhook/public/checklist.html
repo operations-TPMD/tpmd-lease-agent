@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lease Renewal Checklist</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Poppins', sans-serif; }
+    .stage-dot { width: 10px; height: 10px; border-radius: 50%; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+  <div class="max-w-2xl mx-auto px-4 py-8">
+
+    <!-- Header -->
+    <div class="rounded-2xl overflow-hidden shadow-lg mb-6" style="background:linear-gradient(135deg,#d946ef,#7c3aed)">
+      <div class="px-6 py-5 text-white">
+        <p class="text-xs font-bold tracking-widest uppercase opacity-70 mb-1">The Property Management Doctor</p>
+        <h1 class="text-2xl font-bold">Lease Renewal Checklist</h1>
+        <p id="opp-name" class="text-white/80 text-sm mt-1">Loading...</p>
+      </div>
+    </div>
+
+    <!-- Pipeline Progress -->
+    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 mb-6">
+      <p class="text-xs font-bold tracking-widest uppercase text-gray-400 mb-4">Pipeline Progress</p>
+      <div id="pipeline-stages" class="flex items-center gap-1 flex-wrap"></div>
+    </div>
+
+    <!-- Checklist Card -->
+    <div id="checklist-card" class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-4">
+      <div class="flex items-center justify-center h-24 text-gray-400 text-sm">Loading checklist...</div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="fixed bottom-6 right-6 bg-gray-900 text-white text-sm px-5 py-3 rounded-xl shadow-xl opacity-0 transition-opacity duration-300 pointer-events-none z-50"></div>
+
+  </div>
+
+  <script>
+    const STAGES = [
+      { key: 'LEASE_EXPIRING',        label: 'Lease Expiring' },
+      { key: 'RENT_DECISION_PENDING', label: 'Rent Decision' },
+      { key: 'RENEWAL_OFFER_SENT',    label: 'Offer Sent' },
+      { key: 'INSPECTION',            label: 'Inspection' },
+      { key: 'INSPECTION_COMPLETED',  label: 'Review' },
+      { key: 'LEASE_RENEWED',         label: 'Renewed' },
+      { key: 'TENANT_LOST',           label: 'Tenant Lost' },
+    ];
+
+    const STAGE_IDS = {
+      LEASE_EXPIRING:        '__STAGE_LEASE_EXPIRING__',
+      RENT_DECISION_PENDING: '__STAGE_RENT_DECISION_PENDING__',
+      RENEWAL_OFFER_SENT:    '__STAGE_RENEWAL_OFFER_SENT__',
+      INSPECTION:            '__STAGE_INSPECTION__',
+      INSPECTION_COMPLETED:  '__STAGE_INSPECTION_COMPLETED__',
+      LEASE_RENEWED:         '__STAGE_LEASE_RENEWED__',
+      TENANT_LOST:           '__STAGE_TENANT_LOST__',
+    };
+
+    const FIELD_KEYS = {
+      MANAGER_RENT_APPROVAL:        'manager_rent_approval',
+      TENANT_DECISION:              'tenant_decision',
+      FORWARDING_ADDRESS:           'forwarding_address',
+      INSPECTION_COMPLETED:         'inspection_completed',
+      MANAGER_FINAL_DECISION:       'lease_approval',
+      LEASE_SIGNED_BY_TENANT:       'lease_signed_by_tenant',
+      LETTER_SENT_TO_OWNER:         'letter_sent_to_owner',
+      REJECTION_LETTER_SENT_TENANT: 'rejection_letter_sent_to_tenant',
+    };
+
+    const CHECKLIST_CONFIG = {
+      LEASE_EXPIRING: buildRentDecisionStage,
+      RENT_DECISION_PENDING: buildRentDecisionStage,
+      RENEWAL_OFFER_SENT: buildTenantDecisionStage,
+      INSPECTION: buildInspectionStage,
+      INSPECTION_COMPLETED: buildFinalDecisionStage,
+      LEASE_RENEWED: buildWonStage,
+      TENANT_LOST: buildLostStage,
+    };
+
+    const params = new URLSearchParams(location.search);
+    const opportunityId = params.get('id');
+    let opportunity = null;
+
+    async function load() {
+      if (!opportunityId) { showError('No opportunity ID provided.'); return; }
+      try {
+        const res = await fetch(`/api/checklist/${opportunityId}`);
+        const data = await res.json();
+        opportunity = data.opportunity;
+        render();
+      } catch (e) {
+        showError('Failed to load checklist.');
+      }
+    }
+
+    function getFieldValue(key) {
+      const f = (opportunity.customFields || []).find(f => f.key === key);
+      return f ? f.field_value : null;
+    }
+
+    function getCurrentStageKey() {
+      return Object.keys(STAGE_IDS).find(k => STAGE_IDS[k] === opportunity.pipelineStageId) || 'LEASE_EXPIRING';
+    }
+
+    function render() {
+      document.getElementById('opp-name').textContent = opportunity.name || '';
+      renderProgress();
+      renderChecklist();
+    }
+
+    function renderProgress() {
+      const currentKey = getCurrentStageKey();
+      const isLost = currentKey === 'TENANT_LOST';
+      const isWon = currentKey === 'LEASE_RENEWED';
+      const mainStages = STAGES.filter(s => s.key !== 'TENANT_LOST' && s.key !== 'LEASE_RENEWED');
+      const currentIdx = mainStages.findIndex(s => s.key === currentKey);
+
+      const container = document.getElementById('pipeline-stages');
+      container.innerHTML = '';
+
+      mainStages.forEach((stage, i) => {
+        const done = isWon ? true : (i < currentIdx);
+        const active = stage.key === currentKey && !isLost && !isWon;
+
+        const dot = document.createElement('div');
+        dot.className = 'flex flex-col items-center';
+        dot.innerHTML = `
+          <div class="w-3 h-3 rounded-full mb-1 ${done ? 'bg-purple-500' : active ? 'bg-fuchsia-500 ring-4 ring-fuchsia-100' : 'bg-gray-200'}"></div>
+          <span class="text-xs font-medium ${active ? 'text-fuchsia-600' : done ? 'text-purple-500' : 'text-gray-400'}" style="max-width:56px;text-align:center;line-height:1.2">${stage.label}</span>`;
+        container.appendChild(dot);
+
+        if (i < mainStages.length - 1) {
+          const line = document.createElement('div');
+          line.className = `flex-1 h-0.5 mb-4 ${done ? 'bg-purple-400' : 'bg-gray-200'}`;
+          container.appendChild(line);
+        }
+      });
+
+      if (isWon || isLost) {
+        const badge = document.createElement('div');
+        badge.className = `ml-2 px-3 py-1 rounded-full text-xs font-bold ${isWon ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`;
+        badge.textContent = isWon ? 'WON' : 'LOST';
+        container.appendChild(badge);
+      }
+    }
+
+    function renderChecklist() {
+      const stageKey = getCurrentStageKey();
+      const builder = CHECKLIST_CONFIG[stageKey];
+      const card = document.getElementById('checklist-card');
+      card.innerHTML = builder ? builder() : '<p class="text-gray-400 text-sm text-center py-8">No checklist for this stage.</p>';
+    }
+
+    function stageHeader(title, owner, ownerColor) {
+      const colors = { manager: 'bg-violet-100 text-violet-700', tr: 'bg-fuchsia-100 text-fuchsia-700', wo: 'bg-blue-100 text-blue-700' };
+      return `
+        <div class="flex items-start justify-between mb-5">
+          <div>
+            <p class="text-xs font-bold tracking-widest uppercase text-gray-400 mb-1">Current Stage</p>
+            <h2 class="text-xl font-bold text-gray-900">${title}</h2>
+          </div>
+          <span class="text-xs font-bold px-3 py-1 rounded-full ${colors[ownerColor] || colors.manager} whitespace-nowrap ml-3">${owner}</span>
+        </div>`;
+    }
+
+    function instruction(text) {
+      return `<div class="bg-gray-50 rounded-xl p-4 text-sm text-gray-600 mb-5 border border-gray-100">${text}</div>`;
+    }
+
+    function dropdownField(label, key, options, currentValue) {
+      const opts = options.map(o => `<option value="${o}" ${currentValue === o ? 'selected' : ''}>${o}</option>`).join('');
+      return `
+        <div class="mb-4">
+          <label class="block text-sm font-semibold text-gray-700 mb-2">${label}</label>
+          <select onchange="updateField('${key}', this.value)" class="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 bg-white">
+            <option value="">— Select —</option>
+            ${opts}
+          </select>
+        </div>`;
+    }
+
+    function checkboxField(label, key, checked) {
+      return `
+        <label class="flex items-center gap-3 p-4 rounded-xl border cursor-pointer mb-3 transition-colors ${checked ? 'border-purple-300 bg-purple-50' : 'border-gray-200 hover:border-purple-200'}">
+          <input type="checkbox" ${checked ? 'checked' : ''} onchange="updateField('${key}', this.checked ? 'true' : 'false')"
+            class="w-5 h-5 rounded accent-purple-600 cursor-pointer" />
+          <span class="text-sm font-medium text-gray-700 ${checked ? 'line-through text-gray-400' : ''}">${label}</span>
+          ${checked ? '<span class="ml-auto text-green-500 text-lg">✓</span>' : ''}
+        </label>`;
+    }
+
+    function textField(label, key, currentValue) {
+      return `
+        <div class="mb-4">
+          <label class="block text-sm font-semibold text-gray-700 mb-2">${label}</label>
+          <div class="flex gap-2">
+            <input type="text" id="field-${key}" value="${currentValue || ''}" placeholder="Enter address..."
+              class="flex-1 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300" />
+            <button onclick="updateField('${key}', document.getElementById('field-${key}').value)"
+              class="px-4 py-2 rounded-xl text-sm font-semibold text-white" style="background:linear-gradient(135deg,#d946ef,#7c3aed)">Save</button>
+          </div>
+        </div>`;
+    }
+
+    function buildRentDecisionStage() {
+      const val = getFieldValue(FIELD_KEYS.MANAGER_RENT_APPROVAL);
+      return stageHeader('Rent Decision Pending', 'Manager', 'manager')
+        + instruction('Check Appfolio for lease expiration date. Generate market comps and prepare a proposed $50 rent increase for manager approval.')
+        + dropdownField('Manager Rent Approval', FIELD_KEYS.MANAGER_RENT_APPROVAL, ['Approved', 'Pending'], val)
+        + (val === 'Approved' ? '<div class="text-sm text-green-600 font-semibold mt-2">✓ Approved — moving to Renewal Offer Sent</div>' : '');
+    }
+
+    function buildTenantDecisionStage() {
+      const decision = getFieldValue(FIELD_KEYS.TENANT_DECISION);
+      const address = getFieldValue(FIELD_KEYS.FORWARDING_ADDRESS);
+      return stageHeader('Renewal Offer Sent', 'TR Agent', 'tr')
+        + instruction('Contact the tenant and present the renewal offer. Record their decision below.')
+        + dropdownField('Tenant Decision', FIELD_KEYS.TENANT_DECISION, ['Renew', 'Decline'], decision)
+        + (decision === 'Decline' ? textField('Forwarding Address', FIELD_KEYS.FORWARDING_ADDRESS, address) : '');
+    }
+
+    function buildInspectionStage() {
+      const done = getFieldValue(FIELD_KEYS.INSPECTION_COMPLETED);
+      return stageHeader('Inspection', 'Maintenance Coordinator', 'wo')
+        + instruction('Schedule the property inspection with the tenant. Complete the walkthrough and upload photos to the system.')
+        + checkboxField('Inspection Completed & Photos Uploaded', FIELD_KEYS.INSPECTION_COMPLETED, done === 'true' || done === true);
+    }
+
+    function buildFinalDecisionStage() {
+      const decision = getFieldValue(FIELD_KEYS.MANAGER_FINAL_DECISION);
+      const leaseSigned = getFieldValue(FIELD_KEYS.LEASE_SIGNED_BY_TENANT);
+      const letterOwner = getFieldValue(FIELD_KEYS.LETTER_SENT_TO_OWNER);
+      const rejLetter = getFieldValue(FIELD_KEYS.REJECTION_LETTER_SENT_TENANT);
+
+      let extra = '';
+      if (decision === 'Confirm Renewal') {
+        extra = `<div class="mt-4 pt-4 border-t border-gray-100">
+          <p class="text-xs font-bold tracking-widest uppercase text-gray-400 mb-3">Complete to close as Won</p>
+          ${checkboxField('Lease Signed by Tenant', FIELD_KEYS.LEASE_SIGNED_BY_TENANT, leaseSigned === 'true')}
+          ${checkboxField('Letter Sent to Owner', FIELD_KEYS.LETTER_SENT_TO_OWNER, letterOwner === 'true')}
+        </div>`;
+      } else if (decision === 'Reject Renewal') {
+        extra = `<div class="mt-4 pt-4 border-t border-gray-100">
+          <p class="text-xs font-bold tracking-widest uppercase text-gray-400 mb-3">Complete to close as Lost</p>
+          ${checkboxField('Rejection Letter Sent to Tenant', FIELD_KEYS.REJECTION_LETTER_SENT_TENANT, rejLetter === 'true')}
+          ${checkboxField('Letter Sent to Owner', FIELD_KEYS.LETTER_SENT_TO_OWNER, letterOwner === 'true')}
+        </div>`;
+      }
+
+      return stageHeader('Inspection Completed — Pending Review', 'Manager', 'manager')
+        + instruction('Review the inspection photos and reports. Make a final decision on whether to proceed with the renewal.')
+        + dropdownField('Manager Final Decision', FIELD_KEYS.MANAGER_FINAL_DECISION, ['Confirm Renewal', 'Reject Renewal'], decision)
+        + extra;
+    }
+
+    function buildWonStage() {
+      return `<div class="text-center py-8">
+        <div class="text-5xl mb-3">🏆</div>
+        <h2 class="text-xl font-bold text-green-600 mb-1">Lease Renewed</h2>
+        <p class="text-gray-500 text-sm">This renewal has been successfully completed.</p>
+      </div>`;
+    }
+
+    function buildLostStage() {
+      return `<div class="text-center py-8">
+        <div class="text-5xl mb-3">📋</div>
+        <h2 class="text-xl font-bold text-red-500 mb-1">Tenant Lost</h2>
+        <p class="text-gray-500 text-sm">A Move Out has been created for this property.</p>
+      </div>`;
+    }
+
+    async function updateField(key, value) {
+      try {
+        const res = await fetch(`/api/checklist/${opportunityId}/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fieldKey: key, value }),
+        });
+        const data = await res.json();
+
+        if (data.action === 'PROMPT_FORWARDING_ADDRESS') {
+          showToast('Please enter the forwarding address first.');
+          return;
+        }
+
+        showToast(data.moved ? `Stage moved to: ${data.moved.replace(/_/g, ' ')}` : 'Saved.');
+        await load();
+      } catch (e) {
+        showToast('Error saving. Please try again.');
+      }
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.remove('opacity-0');
+      t.classList.add('opacity-100');
+      setTimeout(() => { t.classList.remove('opacity-100'); t.classList.add('opacity-0'); }, 3000);
+    }
+
+    function showError(msg) {
+      document.getElementById('checklist-card').innerHTML =
+        `<p class="text-red-500 text-sm text-center py-8">${msg}</p>`;
+    }
+
+    load();
+  </script>
+</body>
+</html>

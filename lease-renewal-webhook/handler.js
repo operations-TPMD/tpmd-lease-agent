@@ -1,101 +1,99 @@
 const { STAGE_IDS, PIPELINE_IDS, FIELD_KEYS } = require('./config');
 const ghl = require('./ghl');
+const emails = require('./emails');
 
-function getFieldValue(customFields, key) {
-  const field = customFields.find(f => f.key === key);
-  return field ? field.field_value : null;
+function fieldVal(fields, key) {
+  const f = fields.find(f => f.key === key);
+  return f ? f.field_value : null;
 }
 
 function isTrue(val) {
   return val === true || val === 'true' || val === '1' || val === 'checked';
 }
 
-async function handleFieldUpdate(payload) {
-  const { contactId, opportunityId, customFields: updatedFields } = payload;
+function checklistUrl(opportunityId) {
+  return `${process.env.SERVER_URL}/checklist?id=${opportunityId}`;
+}
+
+async function handleFieldUpdate(opportunityId, fieldKey, value) {
+  await ghl.updateOpportunityField(opportunityId, fieldKey, value);
 
   const opportunity = await ghl.getOpportunity(opportunityId);
   const currentStage = opportunity.pipelineStageId;
+  const fields = opportunity.customFields || [];
+  const name = opportunity.name;
+  const url = checklistUrl(opportunityId);
 
-  const allFields = await ghl.getContactFields(contactId);
-  const mergedFields = [...allFields];
-  for (const uf of updatedFields) {
-    const idx = mergedFields.findIndex(f => f.key === uf.key);
-    if (idx >= 0) mergedFields[idx] = uf;
-    else mergedFields.push(uf);
-  }
+  const get = (key) => fieldVal(fields, key);
 
-  const get = (key) => getFieldValue(mergedFields, key);
-
-  // Stage: Lease Expiring or Rent Decision Pending -> Renewal Offer Sent
   if (
     currentStage === STAGE_IDS.LEASE_EXPIRING ||
     currentStage === STAGE_IDS.RENT_DECISION_PENDING
   ) {
     if (isTrue(get(FIELD_KEYS.MANAGER_RENT_APPROVAL))) {
       await ghl.updateOpportunityStage(opportunityId, STAGE_IDS.RENEWAL_OFFER_SENT);
+      await emails.notifyRentApproved(name, url);
       return { moved: 'RENEWAL_OFFER_SENT' };
     }
   }
 
-  // Stage: Renewal Offer Sent -> Inspection or Tenant Lost
   if (currentStage === STAGE_IDS.RENEWAL_OFFER_SENT) {
     const decision = get(FIELD_KEYS.TENANT_DECISION);
 
     if (decision === 'Renew') {
       await ghl.updateOpportunityStage(opportunityId, STAGE_IDS.INSPECTION);
+      await emails.notifyTenantRenews(name, url);
       return { moved: 'INSPECTION' };
     }
 
     if (decision === 'Decline') {
-      const forwardingAddress = get(FIELD_KEYS.FORWARDING_ADDRESS);
-      if (!forwardingAddress) return { action: 'PROMPT_FORWARDING_ADDRESS' };
+      const address = get(FIELD_KEYS.FORWARDING_ADDRESS);
+      if (!address) return { action: 'PROMPT_FORWARDING_ADDRESS' };
 
       await ghl.updateOpportunityStage(opportunityId, STAGE_IDS.TENANT_LOST, 'lost');
       await ghl.createMoveOutOpportunity(
-        { id: contactId, name: opportunity.name },
+        { id: opportunity.contactId, name },
         PIPELINE_IDS.MOVE_OUT,
         STAGE_IDS.MOVE_OUT_INITIAL
       );
+      await emails.notifyTenantDeclines(name, url);
       return { moved: 'TENANT_LOST', createdMoveOut: true };
     }
   }
 
-  // Stage: Inspection -> Inspection Completed Pending Review
   if (currentStage === STAGE_IDS.INSPECTION) {
     if (isTrue(get(FIELD_KEYS.INSPECTION_COMPLETED))) {
       await ghl.updateOpportunityStage(opportunityId, STAGE_IDS.INSPECTION_COMPLETED);
+      await emails.notifyInspectionComplete(name, url);
       return { moved: 'INSPECTION_COMPLETED' };
     }
   }
 
-  // Stage: Inspection Completed Pending Review
-  // Confirm Renewal: both checkboxes required -> Lease Renewed (won)
-  // Reject Renewal: rejection letter + letter to owner -> Tenant Lost (lost) + Move Out
   if (currentStage === STAGE_IDS.INSPECTION_COMPLETED) {
-    const managerDecision = get(FIELD_KEYS.MANAGER_FINAL_DECISION);
+    const decision = get(FIELD_KEYS.MANAGER_FINAL_DECISION);
 
-    if (managerDecision === 'Confirm Renewal') {
-      if (
-        isTrue(get(FIELD_KEYS.LEASE_SIGNED_BY_TENANT)) &&
-        isTrue(get(FIELD_KEYS.LETTER_SENT_TO_OWNER))
-      ) {
+    if (decision === 'Confirm Renewal') {
+      if (!emails._confirmSent) await emails.notifyConfirmRenewal(name, url);
+
+      if (isTrue(get(FIELD_KEYS.LEASE_SIGNED_BY_TENANT)) && isTrue(get(FIELD_KEYS.LETTER_SENT_TO_OWNER))) {
         await ghl.updateOpportunityStage(opportunityId, STAGE_IDS.LEASE_RENEWED, 'won');
+        await emails.notifyLeaseRenewed(name, url);
         return { moved: 'LEASE_RENEWED' };
       }
       return { action: 'WAITING_FOR_LEASE_SIGN_AND_LETTER' };
     }
 
-    if (managerDecision === 'Reject Renewal') {
-      if (
-        isTrue(get(FIELD_KEYS.REJECTION_LETTER_SENT_TENANT)) &&
-        isTrue(get(FIELD_KEYS.LETTER_SENT_TO_OWNER))
-      ) {
+    if (decision === 'Reject Renewal') {
+      if (!emails._rejectSent) await emails.notifyRejected(name, url);
+
+      if (isTrue(get(FIELD_KEYS.REJECTION_LETTER_SENT_TENANT)) && isTrue(get(FIELD_KEYS.LETTER_SENT_TO_OWNER))) {
         await ghl.updateOpportunityStage(opportunityId, STAGE_IDS.TENANT_LOST, 'lost');
         await ghl.createMoveOutOpportunity(
-          { id: contactId, name: opportunity.name },
+          { id: opportunity.contactId, name },
           PIPELINE_IDS.MOVE_OUT,
           STAGE_IDS.MOVE_OUT_INITIAL
         );
+        await emails.notifyTenantLost(name, url);
         return { moved: 'TENANT_LOST', createdMoveOut: true };
       }
       return { action: 'WAITING_FOR_REJECTION_LETTERS' };
@@ -105,4 +103,10 @@ async function handleFieldUpdate(payload) {
   return { action: 'NO_TRANSITION' };
 }
 
-module.exports = { handleFieldUpdate };
+async function handleNewOpportunity(opportunityId) {
+  const opportunity = await ghl.getOpportunity(opportunityId);
+  if (opportunity.pipelineId !== PIPELINE_IDS.RENEWAL) return;
+  await emails.notifyNewLead(opportunity.name, checklistUrl(opportunityId));
+}
+
+module.exports = { handleFieldUpdate, handleNewOpportunity };

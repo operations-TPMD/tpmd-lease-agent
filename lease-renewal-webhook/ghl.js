@@ -15,23 +15,23 @@ async function getOpportunity(opportunityId) {
   return data.opportunity;
 }
 
-async function updateOpportunityStage(opportunityId, stageId, status = null) {
-  const payload = { stageId };
-  if (status) payload.status = status;
-  const { data } = await client.put(`/opportunities/${opportunityId}`, payload);
-  return data;
+async function getOpportunityFields(opportunityId) {
+  const opp = await getOpportunity(opportunityId);
+  return opp.customFields || [];
 }
 
-async function updateContactField(contactId, fieldKey, value) {
-  const { data } = await client.put(`/contacts/${contactId}`, {
+async function updateOpportunityField(opportunityId, fieldKey, value) {
+  const { data } = await client.put(`/opportunities/${opportunityId}`, {
     customFields: [{ key: fieldKey, field_value: value }],
   });
   return data;
 }
 
-async function getContactFields(contactId) {
-  const { data } = await client.get(`/contacts/${contactId}`);
-  return data.contact?.customFields || [];
+async function updateOpportunityStage(opportunityId, stageId, status = null) {
+  const payload = { stageId };
+  if (status) payload.status = status;
+  const { data } = await client.put(`/opportunities/${opportunityId}`, payload);
+  return data;
 }
 
 async function createMoveOutOpportunity(contact, pipelineId, stageId) {
@@ -48,8 +48,8 @@ async function createMoveOutOpportunity(contact, pipelineId, stageId) {
 
 module.exports = {
   getOpportunity,
+  getOpportunityFields,
+  updateOpportunityField,
   updateOpportunityStage,
-  updateContactField,
-  getContactFields,
   createMoveOutOpportunity,
 };
