@@ -1,0 +1,291 @@
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --card:      #1c2128;
+    --border:    rgba(255,255,255,0.08);
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --accent:    #e94560;
+    --green:     #3fb950;
+    --blue:      #58a6ff;
+
+    /* chord colours */
+    --c-ii:   #a371f7;
+    --c-V:    #f78166;
+    --c-I:    #56d364;
+    --c-Vii:  #ffa657;   /* V/ii — warm amber */
+
+    /* degree colours */
+    --deg-ct:  #56d364;   /* chord tone  — green */
+    --deg-sc:  #58a6ff;   /* scale tone  — blue  */
+    --deg-chr: #f78166;   /* chromatic   — orange */
+}
+
+body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px 16px 48px;
+}
+
+.app { max-width: 1100px; margin: 0 auto; }
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+header {
+    text-align: center;
+    padding: 32px 0 24px;
+}
+header h1 {
+    font-size: 2em;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--c-ii), var(--c-V), var(--c-I), var(--c-Vii));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 6px;
+}
+header p { color: var(--muted); font-size: 0.95em; }
+
+/* ── Global controls ─────────────────────────────────────────────────────── */
+.global-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 20px;
+    margin-bottom: 28px;
+}
+
+.ctrl {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.ctrl label { color: var(--muted); font-size: 0.85em; white-space: nowrap; }
+
+input[type="range"] { width: 120px; accent-color: var(--accent); cursor: pointer; }
+
+#tempo-display { color: var(--accent); font-weight: 700; font-size: 0.9em; min-width: 72px; }
+
+.ctrl-buttons {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+    flex-wrap: wrap;
+}
+
+.ear-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.88em;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+}
+.ear-label input { cursor: pointer; accent-color: var(--accent); }
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 7px;
+    font-size: 0.88em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity .15s, transform .15s;
+    white-space: nowrap;
+}
+.btn:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
+.btn:disabled             { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+.btn.primary   { background: linear-gradient(135deg, #6e40c9, #e94560); color: #fff; }
+.btn.success   { background: var(--green);  color: #0d1117; }
+.btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn.danger    { background: transparent; color: var(--accent); border: 1px solid var(--accent); font-size: 0.8em; padding: 6px 10px; }
+
+/* ── Progression row ─────────────────────────────────────────────────────── */
+.progression-row {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 0;
+}
+
+.row-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+.row-header label { color: var(--muted); font-size: 0.85em; }
+
+select {
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    border-radius: 7px;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+select:focus { outline: none; border-color: var(--blue); }
+
+.row-badge {
+    margin-left: auto;
+    font-size: 0.78em;
+    color: var(--muted);
+    background: rgba(255,255,255,0.05);
+    padding: 3px 10px;
+    border-radius: 20px;
+}
+
+/* 4-column grid for the 4 chord cards */
+.row-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+
+/* ── Connector between rows ──────────────────────────────────────────────── */
+.row-connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 0;
+    color: var(--muted);
+    font-size: 0.82em;
+    text-align: center;
+}
+.connector-arrow { font-size: 1.2em; color: var(--c-Vii); }
+.connector-text strong { color: var(--c-ii); }
+
+/* ── Chord card ──────────────────────────────────────────────────────────── */
+.chord-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* Top border colour per chord degree */
+.chord-card[data-chord="ii"]   { border-top: 3px solid var(--c-ii);  }
+.chord-card[data-chord="V"]    { border-top: 3px solid var(--c-V);   }
+.chord-card[data-chord="I"]    { border-top: 3px solid var(--c-I);   }
+.chord-card[data-chord="V/ii"] { border-top: 3px solid var(--c-Vii); }
+
+.card-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.degree { font-size: 1.6em; font-weight: 800; line-height: 1; }
+.chord-card[data-chord="ii"]   .degree { color: var(--c-ii);  }
+.chord-card[data-chord="V"]    .degree { color: var(--c-V);   }
+.chord-card[data-chord="I"]    .degree { color: var(--c-I);   }
+.chord-card[data-chord="V/ii"] .degree { color: var(--c-Vii); }
+
+.chord-name { color: var(--muted); font-size: 0.85em; }
+
+/* ── Tablature ───────────────────────────────────────────────────────────── */
+.tab-wrap {
+    background: #010409;
+    border-radius: 7px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    border: 1px solid rgba(255,255,255,0.04);
+}
+
+.tab-display {
+    font-family: 'Courier New', 'Lucida Console', monospace;
+    font-size: 0.88em;
+    line-height: 1.75;
+    color: #4ec94e;
+    white-space: pre;
+    transition: filter .3s;
+}
+.tab-display.blurred { filter: blur(5px); user-select: none; }
+
+/* Degree annotation colours inside the <pre> */
+.tab-display .deg-ct  { color: var(--deg-ct);  }  /* chord tone  */
+.tab-display .deg-sc  { color: var(--deg-sc);  }  /* scale tone  */
+.tab-display .deg-chr { color: var(--deg-chr); font-weight: 700; }  /* chromatic */
+
+/* ── Legend ──────────────────────────────────────────────────────────────── */
+.legend-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.leg { font-size: 0.72em; color: var(--muted); }
+.deg-ct-demo  { color: var(--deg-ct);  }
+.deg-sc-demo  { color: var(--deg-sc);  }
+.deg-chr-demo { color: var(--deg-chr); }
+
+/* ── Inline explanation ──────────────────────────────────────────────────── */
+.explain-body {
+    background: rgba(255,255,255,0.025);
+    border-radius: 7px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.8em;
+    line-height: 1.5;
+}
+
+.explain-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.explain-role {
+    font-weight: 700;
+    font-size: 0.82em;
+    padding: 1px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+.chord-card[data-chord="ii"]   .explain-role { background: rgba(163,113,247,.2); color: var(--c-ii);  }
+.chord-card[data-chord="V"]    .explain-role { background: rgba(247,129,102,.2); color: var(--c-V);   }
+.chord-card[data-chord="I"]    .explain-role { background: rgba(86,211,100,.2);  color: var(--c-I);   }
+.chord-card[data-chord="V/ii"] .explain-role { background: rgba(255,166,87,.2);  color: var(--c-Vii); }
+
+.explain-rolenote { color: var(--muted); font-size: 0.9em; }
+.explain-key { color: var(--muted); font-weight: 600; white-space: nowrap; }
+
+.chr-notes {
+    margin: 4px 0 0 0;
+    padding-left: 14px;
+    list-style: disc;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+}
+.chr-notes li { margin-bottom: 3px; color: var(--muted); }
+.chr-notes li strong { color: var(--deg-chr); }
+.chr-header { list-style: none; font-weight: 600; color: var(--deg-chr); font-size: 0.88em; }
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .row-cards { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+    .row-cards { grid-template-columns: 1fr; }
+    header h1  { font-size: 1.5em; }
+    .global-controls { flex-direction: column; align-items: flex-start; }
+    .ctrl-buttons { margin-left: 0; }
+}

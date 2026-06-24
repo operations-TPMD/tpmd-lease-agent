@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jazz Bass Lick Generator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+
+        <header>
+            <h1>🎸 Jazz Bass Lick Generator</h1>
+            <p>ii → V → I → V/ii — build your jazz changes vocabulary</p>
+        </header>
+
+        <div class="global-controls">
+            <div class="ctrl">
+                <label>Tempo:</label>
+                <input type="range" id="tempo-slider" min="40" max="200" value="80">
+                <span id="tempo-display">80 BPM</span>
+            </div>
+            <div class="ctrl-buttons">
+                <button id="play-all-btn" class="btn success" disabled>▶ Play All</button>
+                <button id="add-row-btn" class="btn secondary">+ Add Row</button>
+                <label class="ear-label">
+                    <input type="checkbox" id="hide-tabs">
+                    👂 Ear Training
+                </label>
+            </div>
+        </div>
+
+        <div id="rows-container"></div>
+
+    </div>
+
+    <script src="js/music-theory.js"></script>
+    <script src="js/lick-generator.js"></script>
+    <script src="js/audio.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
