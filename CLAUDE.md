@@ -75,15 +75,39 @@ This is the main system we work on. Full self-showing flow:
 
 AppFolio does not have a real API — data is pulled via **CSV exports** from Report Builder.
 
-### Investor Reporting (V9 — current version)
-Two clean Report Builder exports:
-1. **Main report** — combines: Rent Roll + General Ledger (32-account whitelist) + Occupancy Summary + Property Directory
-2. **Work Orders report** — separate export
+### Two Report Pipelines
 
-Rules:
+| Pipeline | Function | UI Component | Purpose |
+|----------|----------|--------------|---------|
+| **V8** | `buildReportsFromBulk` | `ReportGenerator` (V8 label) | Monthly Portfolio Report — team/management use. Kept as backup while V9 is validated. |
+| **V9** | `buildInvestorReportsV9` | `ReportGeneratorV9` (V9 label) | Investor Report — sent to owners monthly. **Current active pipeline.** |
+
+### V9 Input Files (3 CSVs)
+1. **General Ledger** (`general_ledger-*.csv`) — all transactions for the month, flat row-per-line format. Source of all income, expense, distribution data.
+2. **Rent Roll Itemized** (`report_builder-rent_roll_itemized-*.csv`) — tenant occupancy, lease dates, owner names.
+3. **Trust Account Balance** (`trust_account_balance-*.csv`) — reserve/cash balance per property.
+
+### GL Classification Logic (direction-based, verified against AppFolio Owner Statements May–June 2026)
+- **Income** (4xxx): `credit - debit`. Direction matters — same account can be income or refund.
+- **Distribution** (3250): `abs(debit - credit)`.
+- **Expense** (5xxx–7xxx + 2120 Clearing): `debit - credit`.
+- **6113 Vendor Discounts**: tagged `expense_markup`, merged with vendor cost row on same Reference+Date. Only merge when EXACTLY 1 cost + 1 markup — otherwise warn + emit separately.
+- **Skipped accounts**: 4440 (Application Fee — doesn't net cleanly across periods), 6002, 4210, 4200, 1150, 1160, 2101.
+- **Expense categories**: 5xxx = maintenance; 6121/6122/6123/6130 = Mortgage & Interest; 6161/6162 = Taxes; 6100–6119 = Management & Fees; 6120–6149 = maintenance; 6150–6179 = Utilities; 6180–6199 = Insurance/Legal/Other.
+- **Date filter**: uses each row's own Date column. 1150 rows are skipped entirely so their dates never touch income totals.
+
+### Gmail Auto-fetch (V9)
+V9 can fetch CSVs from AppFolio scheduled report emails automatically:
+- GL: `from:donotreply@appfolio.com subject:"General Ledger"`, prefix `general_ledger-`
+- Rent Roll: `from:donotreply@appfolio.com subject:"Rent Roll"`, prefix `report_builder-`
+- Trust Balance: `from:donotreply@appfolio.com subject:"Trust Account Balance"`, prefix `trust_account_balance-`
+- **Note**: Trust Balance filename prefix needs verification after first scheduled email is received.
+
+### Rules
 - Use relative date filters (not hardcoded dates)
 - Never overwrite existing owner email data
 - Rodny does QA before investor distribution
+- V8 legacy functions (`parseGLIncome`, `parseCashFlowDetail`, etc.) kept with `// LEGACY` comments until V9 GL output is fully verified month-by-month
 
 ---
 
