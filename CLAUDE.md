@@ -126,6 +126,17 @@ V9 can fetch CSVs from AppFolio scheduled report emails automatically:
 
 ---
 
+## Team Portal (Employee Interface) Conventions
+- **Every list page in `src/pages/team/` must support deleting individual rows.** When adding a new list-type page, include a delete button (Trash2 icon) with a confirm step — don't ship a list without one.
+- Delete pattern depends on the data shape:
+  - Entity-per-row pipelines (Lease Renewals, Move In/Out) → inline "Delete? Yes/No" confirm, then `entity.delete(id)`.
+  - Simple record lists (Inspections, Work Orders, Leasing Inquiries) → `confirm()` dialog, then `entity.delete(id)`.
+  - Array-of-rows-in-one-record data (Past Due Tracker snapshots) → soft delete by flagging `{ deleted: true }` on the row and re-saving the parent record, not a real entity delete.
+- **Check the entity's `.jsonc` `rls` block before wiring up delete.** Entities with no `rls` block at all (`WorkOrder`, `LeaseRenewalEntry`, `PastDueSnapshot`, `MoveInEntry`, `MoveOutEntry`) have open CRUD by default. Entities with an explicit `rls.delete` restriction (e.g. `Inspection`, `LeasingInquiry`) will silently fail for roles not listed — `Inspection` delete was opened to `employee` (previously admin/owner only) so the team portal delete button works for all staff.
+- **Vendor Directory is the exception** — vendors are fetched live from GHL contacts (`getGHLVendors`), not a Base44 entity. There is no delete button there and none should be added without a dedicated backend function, since deleting a GHL contact is irreversible and can break CRM automations tied to that contact.
+
+---
+
 ## Other Active Systems
 - **VA Recruitment** — Base44 app with toggle, task filtering, application form, video upload, bulk archive
 - **Pricing Page** — modular service store (Maintenance / Leasing / Tenant Relations / Full Management) with combo detection and savings calculator
