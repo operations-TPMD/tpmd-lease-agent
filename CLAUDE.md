@@ -154,6 +154,41 @@ V9 can fetch CSVs from AppFolio scheduled report emails automatically:
 
 ---
 
+## Weekly Leasing Reports
+
+**UI:** `src/components/team/LeasingReportGenerator.jsx`  
+**Backend:** `base44/functions/buildWeeklyLeasingReports/entry.ts`  
+**Send function:** `base44/functions/sendSingleEmail/entry.ts`
+
+Weekly per-property leasing activity report sent to property owners via Gmail.
+
+### Flow
+1. UI calls `buildWeeklyLeasingReports` → pulls GHL contacts with showings this week, builds per-property metrics (inquiries, tours, scheduled, starting rent, current rent, days on market, feedback map)
+2. User can edit metrics manually in the UI before sending
+3. User selects recipients via checkboxes (owner = To, team members = CC)
+4. UI calls `sendSingleEmail` with the final HTML, recipient list, and subject
+5. `sendSingleEmail` uses mimetext + Gmail API to send
+
+### Key implementation details
+- **Auth**: both functions check `!user` only — no role restriction. Employees need access.
+- **`isActive` check**: use `property.isActive === false` (not `!property.isActive`) — properties with `null`/`undefined` `isActive` should be treated as active.
+- **Gmail send**: use JSON endpoint (`gmail/v1/users/me/messages/send`) with `{ raw: msg.asEncoded() }` — NOT the upload endpoint with `Content-Type: message/rfc822`. `asEncoded()` returns base64url which the JSON endpoint expects directly.
+- **Error handling**: `sendSingleEmail` always returns HTTP 200, even on failure — returns `{ error, success: false }` so the frontend can read the actual error message (HTTP 500 causes the Base44 SDK to throw before the body is readable).
+- **Recipient logic**: `checkedEmails[0]` = To, `checkedEmails.slice(1)` = CC. `TEAM_LABELS` in the JSX maps emails to display names for the checkbox UI.
+
+### Email HTML design
+Both `buildHtmlContent` (frontend preview) and `buildHtml` (backend, actual email sent) must stay in sync — update both when changing the template.
+
+Design matches the monthly investor report style:
+- TPMD logo (`LOGO_URL` constant, same Dropbox URL as `buildInvestorReportsV9`)
+- `Segoe UI` font, white background
+- Bubble cards: `border-radius:20px`, `box-shadow:0 4px 6px rgba(0,0,0,0.05)`
+- Section headers: `color:#3b0764`, `border-bottom:3px solid #d946ef`
+- Stat values: `color:#3b0764` (fuchsia for positive, red for price drop, orange for high DOM)
+- Footer: plain `border-top:3px solid #3b0764`
+
+---
+
 ## Other Active Systems
 - **VA Recruitment** — Base44 app with toggle, task filtering, application form, video upload, bulk archive
 - **Pricing Page** — modular service store (Maintenance / Leasing / Tenant Relations / Full Management) with combo detection and savings calculator
