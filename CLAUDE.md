@@ -73,6 +73,15 @@ This is the main system we work on. Full self-showing flow:
 
 ---
 
+## Smart Locks / Daily Door Code Pipeline
+- **Two door-code send paths, same matching logic**: `sendDoorCodeOnVerified` (one-time, fires right after ID verification) and `sendDailyDoorCodes` (daily, texts the code to every contact with a showing today). Both contain an identical local copy of `findMatchingProperties` — if you fix a matching bug in one, fix it in the other too.
+- **Backup code source is `SmartLock.backup_code`** (Smart Locks Manager), not the GHL contact's `lockbox_passcode` custom field — changed 2026-07-11 so ops only maintains backup codes in one place. When no valid `DailyCodes` code exists for the matched property, the fallback looks up the `SmartLock` row whose `property_id` matches, not the contact record.
+- **Address matching** (`findMatchingProperties` in both functions): matches the GHL contact's `property_address` custom field against `DirectoryProperty.address` — exact/substring first, then a fuzzy pass tolerant of a 1-digit house-number typo. It strips `Unit`/`Apt`/`Suite`/`#N` designators from both sides before parsing, since a leading unit token (e.g. "Unit 4 - 7317 46th Ave N") used to get misread as the house number and silently break matching.
+- **Known gap — multi-unit buildings**: GHL's `property_address` field has no unit info, so if a building has one `DirectoryProperty` row per unit sharing the same street address, `findMatchingProperties` can't disambiguate between units. This is harmless if one lock serves the whole building (only the unit tied to that lock will have a valid code), but would need unit-aware matching if each unit needs its own code.
+- **Smart Locks Manager UI** (`src/components/team/SmartLocksPanel.jsx`) "Today's Code" column only displays a code if it was actually generated today (ET) and hasn't expired — mirrors the backend's `validTodayCodes` check, so ops doesn't see a code that looks current but that the send flow would actually skip in favor of the backup code.
+
+---
+
 ## AppFolio Data Pipeline
 
 AppFolio does not have a real API — data is pulled via **CSV exports** from Report Builder.
