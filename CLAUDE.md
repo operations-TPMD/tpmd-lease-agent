@@ -104,6 +104,12 @@ Every sync now returns `stale` (records whose address+unit didn't appear in this
 
 `DirectoryProperty` rows with `is_asset_management: true` are never reported as stale — those properties are intentionally absent from the AppFolio Rent Roll by design (see `AppFolio Data Pipeline` and the `is_asset_management` field description), so their absence isn't a signal of anything.
 
+### `address` is refreshed on every matched sync, not just on create
+The sync-mode update payload used to omit `address` entirely, so once a row's address text drifted from AppFolio's actual property name — e.g. a legacy export left a stray `#TenantName` or `#Unit N` suffix baked into it — nothing ever corrected it: the row kept matching (and getting its other fields refreshed) forever with the wrong `address`, while any later, correctly-parsed row for the same property was created as a **second, separate record**, producing exactly the duplicate-with-garbled-name pairs ops kept seeing in the directory. `address` was never in `PROTECTED`, confirming the omission was accidental. Fixed by always including `entry.address` in the update payload, so a matched record's address self-heals to the current parse on every sync. Rows that never match anything (a true orphaned duplicate with no counterpart in the current Rent Roll) still won't self-heal — those surface via the stale-record review above and need a manual delete.
+
+### Rebuild mode preserves Asset Management properties even though they're never in the Rent Roll
+Rebuild deletes every existing `DirectoryProperty` row and recreates only what's in `entries` (the parsed Rent Roll). Since Asset Management properties are never in the Rent Roll by design, they were being deleted and never recreated — silent, permanent data loss on every rebuild, undetected because rebuild mode has no stale-review step. Fixed: before the delete pass, any existing `is_asset_management` row whose address+unit isn't also present in this run's `entries` (guards the rare case where a property is flagged AM but genuinely also appears in the Rent Roll) is recreated as-is after the main create pass, reported back as `assetManagementRestored`.
+
 ---
 
 ## AppFolio Data Pipeline
