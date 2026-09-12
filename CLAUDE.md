@@ -83,6 +83,29 @@ This is the main system we work on. Full self-showing flow:
 
 ---
 
+## Property Directory Sync (Team Portal)
+
+**Backend:** `base44/functions/syncDirectoryFromGmail/entry.ts` (repo: `operations-TPMD/the-property-management-doctor`)
+**UI:** `src/pages/team/PropertyDirectory.jsx` — "Sync from Reports" button
+
+Pulls the AppFolio Rent Roll CSV from Gmail (same `gmail` connector as the weekly leasing reports and V9 investor reports) and upserts it into the `DirectoryProperty` entity that backs the Team Portal directory.
+
+### Matching key is address + unit, not address alone
+`DirectoryProperty` holds one row per unit. Matching on street address alone (the old behavior) collapsed every unit of a multi-unit building onto a single record — last-parsed unit wins, the rest are silently skipped or overwritten with the wrong tenant. `findExisting` now matches on `address + normalized unit` first; it only falls back to an address-only match when the building has exactly one existing record (so there's no ambiguity about which unit a legacy unit-less row belongs to). The same address+unit key is used in rebuild-mode's field-preservation logic (TTLock id, filter dates, notes, owner email) — keying that by address alone was handing one unit's lock/filter data to every other unit in the building.
+
+### Vacated units clear tenant contact info
+Previously `tenant_email`/`tenant_phone` were only overwritten when the new row carried a value, so a vacated unit kept the old tenant's email/phone indefinitely, and `available_date` stayed stuck even after the unit was re-let. The sync now clears `tenant_name`/`tenant_email`/`tenant_phone` when a unit goes vacant or its tenant changes, and clears `available_date` once occupied again.
+
+### Stale records are reported, never auto-deleted
+Every sync now returns `stale` (records whose address+unit didn't appear in this Rent Roll) and `staleCount`. The UI shows an "Outdated (N)" button that opens a review modal listing them — nothing is deleted automatically, since a property that left management and an incomplete CSV export look identical from the sync's perspective. Deleting requires:
+- Explicit user action (`pruneStale: true` in the request body) — never a side effect of a normal sync.
+- `admin`/`owner` role — sync/update stays open to all employees, but this delete path checks role server-side.
+- Staying under 50% of the directory — if more than half the existing records are "missing" from the Rent Roll, the function refuses (assumes a truncated/bad export) unless `force: true` is also passed.
+
+`DirectoryProperty` rows with `is_asset_management: true` are never reported as stale — those properties are intentionally absent from the AppFolio Rent Roll by design (see `AppFolio Data Pipeline` and the `is_asset_management` field description), so their absence isn't a signal of anything.
+
+---
+
 ## AppFolio Data Pipeline
 
 AppFolio does not have a real API — data is pulled via **CSV exports** from Report Builder.
