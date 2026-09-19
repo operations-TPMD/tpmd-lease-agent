@@ -139,10 +139,10 @@ AppFolio does not have a real API — data is pulled via **CSV exports** from Re
 
 ### Gmail Auto-fetch (V9)
 V9 can fetch CSVs from AppFolio scheduled report emails automatically:
-- GL: `from:donotreply@appfolio.com subject:"GL Report"`, prefix `general_ledger-`
+- GL: `from:donotreply@appfolio.com subject:"GL"`, prefix `general_ledger-`
 - Rent Roll: `from:donotreply@appfolio.com subject:"Rent Roll"`, prefix `rent_roll_itemized-`
 - Trust Balance: `from:donotreply@appfolio.com subject:"Trust"`, prefix `trust_account_balance-`
-- **Fixed 2026-09-19**: the GL and Trust Balance subject queries used to search for the full report names (`"General Ledger"` / `"Trust Account Balance"`), which never matched — AppFolio's actual subject lines are short (`"GL - GL Report"`, `"Trust - Please make sure that the dates are accurate before using"`). This silently produced $0.00 across every income/expense/NOI/distribution/reserve line in every owner's V9 report, since a missing GL or Trust Balance CSV zeroes those fields for the whole run (only occupancy/tenant data, sourced from Rent Roll, still populated). Filename prefixes were already correct — only the subject search text was wrong.
+- **Fixed 2026-09-19**: the GL and Trust Balance subject queries used to search for the full report names (`"General Ledger"` / `"Trust Account Balance"`), which never matched — AppFolio's actual subject lines are just the short label alone (`"GL"`, `"Trust"`, `"Rent Roll"`). This silently produced $0.00 across every income/expense/NOI/distribution/reserve line in every owner's V9 report, since a missing GL or Trust Balance CSV zeroes those fields for the whole run (only occupancy/tenant data, sourced from Rent Roll, still populated). Filename prefixes were already correct — only the subject search text was wrong. **Gotcha**: Gmail's inbox list view renders as `Subject - body snippet`, e.g. `"GL - GL Report"` — the part after the dash is the email body preview, not the subject; verify against the opened email's real headers (or "Show original"), not the list row.
 
 ### Rules
 - Use relative date filters (not hardcoded dates)
