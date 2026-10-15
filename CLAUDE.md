@@ -159,6 +159,12 @@ Rather than sending V9 reports to owners automatically, `buildInvestorReportsV9`
 ### V9 report disclaimer (approved by Edan 2026-10-15)
 `buildHtmlReport`'s `portalNote` (both `en`/`he`) now explicitly tells the investor this report is auto-generated from portal data for their convenience, that occasional errors can occur in an automated summary, and that the AppFolio Owner Portal is the authoritative/most reliable source — replaces the narrower earlier wording that only said "for full accounting data, see the portal."
 
+### Simplified approval flow (added 2026-10-15)
+The original approval-gate flow (open the email → manually click "Auto-fetch from Gmail" → manually check the clean rows → Send) was too many manual steps for Edan, each one a place to forget something. Cut to effectively two actions:
+- The approval email's "Review & Send" link now points to `/team/reports?autofetch=v9` instead of a bare `/team/reports`. `ReportGeneratorV9` (`src/components/team/ReportGenerator.jsx`) reads that query param in a mount-only `useEffect` and calls its own `generate(true)` automatically — the reviewer no longer has to find and click "Auto-fetch from Gmail" themselves. (This re-fetches from Gmail rather than reusing the exact run that built the email — simpler and more robust than adding a shared persisted-report cache, since `UserSavedReport`'s RLS is scoped to `{{user.email}}` and would need a new auth-gated read path to share across users; re-running the same idempotent fetch was the lower-risk option.)
+- `generate()`'s success handler now also pre-populates `selectedReports` with every report that has no `warnings` (and isn't the "⚠️ Pipeline Issues" row) via a new `setSelectedReports` prop threaded down from `ReportGenerator`. Flagged reports stay unchecked by default — including one in "Send Selected Reports" now takes a deliberate click instead of remembering to exclude it from "Select All."
+- End state: click the email link → skim the pre-checked table (flagged rows visibly unchecked) → click "Send Selected Reports" → confirm dialog. The confirm dialog is unchanged — it's the real safety net, not a step worth removing.
+
 ### Rules
 - Use relative date filters (not hardcoded dates)
 - Never overwrite existing owner email data
