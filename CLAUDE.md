@@ -156,6 +156,9 @@ Rather than sending V9 reports to owners automatically, `buildInvestorReportsV9`
 - **File-date validation (added 2026-10-15)**: GL already gets a content-based period check (`detectGLPeriod`/`validateGLDates`, reads transaction dates). Rent Roll and Trust Balance have no such in-CSV period signal, and AppFolio can resend either more than once a month (a real inbox had 7-8 matching emails for one report type) — "the newest matching email" isn't guaranteed to cover the right period. `searchGmailForReport` now returns `{ text, filename, msgDate }` instead of a bare string; `doBuildReports` passes the Rent Roll/Trust Balance metadata to a new `validateFileDate(meta, period, label, warnings)`, which parses the `YYYYMMDD` suffix AppFolio bakes into the filename (falling back to the Gmail message date) and warns if the file predates the reporting period — the stale-snapshot case, not a strict "must be exactly month-end" check. Payload-supplied CSVs (tests, or a future manual-upload path) carry no filename, so this only fires for Gmail-fetched files.
 - **Still nothing is ever auto-sent to an owner.** The email only links to the existing manual send UI; approving/sending stays a deliberate human click.
 
+### V9 report disclaimer (approved by Edan 2026-10-15)
+`buildHtmlReport`'s `portalNote` (both `en`/`he`) now explicitly tells the investor this report is auto-generated from portal data for their convenience, that occasional errors can occur in an automated summary, and that the AppFolio Owner Portal is the authoritative/most reliable source — replaces the narrower earlier wording that only said "for full accounting data, see the portal."
+
 ### Rules
 - Use relative date filters (not hardcoded dates)
 - Never overwrite existing owner email data
