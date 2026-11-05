@@ -37,7 +37,7 @@ AI-powered lease lead management system for TPMD.
 4. **Set Environment Variables on Railway**
    - In Railway dashboard, go to Variables
    - Add:
-     - `GHL_API_KEY` = `pit-c65311e9-d2fb-49ff-8b63-6e0cb788e47c`
+     - `GHL_API_KEY` = `your_ghl_private_integration_token`
      - `GHL_LOCATION_ID` = `SjWHHlnUgHBOTcvFq7Vp`
      - `OPENAI_API_KEY` = your key
      - `ANTHROPIC_API_KEY` = your key
