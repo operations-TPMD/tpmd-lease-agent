@@ -117,7 +117,7 @@ Complete all 5 workflows below for the lease agent system to work end-to-end.
 
 ## Important Notes
 
-- **Webhook URL:** Replace `YOUR_DOMAIN` with your deployed server (e.g., `tpmd-lease-agent.railway.app`)
+- **Webhook URL:** Point webhooks at the Base44 functions in `the-property-management-doctor`. The old Railway host (`tpmd-lease-agent.railway.app`) is shut down — any GHL webhook still pointing there must be repointed or removed.
 - **Voice Bot Agent ID:** `69d658fa4ccb41abc9c6f543` (already set)
 - **Custom Fields to track:**
   - `showing_date` - when customer scheduled the showing
