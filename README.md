@@ -10,43 +10,13 @@ AI-powered lease lead management system for TPMD.
 - Instant webhook response to inbound messages
 - DRY RUN and LIVE modes
 
-## Deploy to Railway (Free)
+## Status: retired (no hosting)
 
-1. **Create a GitHub repo**
-   - Go to github.com, create new repo named `tpmd-lease-agent`
-   - Don't initialize with README
-   
-2. **Push your code**
-   ```bash
-   cd "C:\Users\idanb\Desktop\Claude"
-   git add .
-   git commit -m "Initial commit"
-   git branch -M main
-   git remote add origin https://github.com/YOUR_USERNAME/tpmd-lease-agent.git
-   git push -u origin main
-   ```
-
-3. **Deploy on Railway**
-   - Go to railway.app
-   - Click "New Project" → "Deploy from GitHub"
-   - Select your `tpmd-lease-agent` repo
-   - Railway auto-detects Python and Procfile
-   - Click "Deploy"
-   - Wait 2-5 minutes, get your public URL
-
-4. **Set Environment Variables on Railway**
-   - In Railway dashboard, go to Variables
-   - Add:
-     - `GHL_API_KEY` = `your_ghl_private_integration_token`
-     - `GHL_LOCATION_ID` = `SjWHHlnUgHBOTcvFq7Vp`
-     - `OPENAI_API_KEY` = your key
-     - `ANTHROPIC_API_KEY` = your key
-
-5. **Access**
-   - Railway gives you a URL like `https://tpmd-lease-agent.railway.app`
-   - Share with your team — no password needed
-
-Done! Your dashboard is live.
+This Python bot is no longer deployed. The Railway hosting was shut down — the live
+leasing system (inbound/outbound calls, lead bot, reports, pipelines) runs entirely on
+Base44 in `operations-TPMD/the-property-management-doctor`, which is where all new work goes.
+The Railway deploy files (`Procfile`, `runtime.txt`) were removed so nothing can redeploy it.
+Code is kept here for reference only.
 
 ## Local Development
 
